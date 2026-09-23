@@ -62,12 +62,26 @@ def download_models_from_gdrive():
 
         st.write("Starting gdown.download_folder() ...")
 
-        downloaded_files = gdown.download_folder(
-            id=GDRIVE_WEATHER_MODELS_FOLDER_ID,
-            output=str(temp_dir),
-            quiet=False,
-            use_cookies=False
+        #downloaded_files = gdown.download_folder(
+        #    id=GDRIVE_WEATHER_MODELS_FOLDER_ID,
+        #    output=str(temp_dir),
+        #    quiet=False,
+        #    use_cookies=False
+        #)
+        st.write("Single file download test start")
+
+        test_file = gdown.download(
+            id="ここにsummary_all.csvのファイルID",
+            output="summary_all.csv",
+            quiet=False
         )
+
+        st.write("Result =", test_file)
+
+        if Path("summary_all.csv").exists():
+            st.success("download success")
+        else:
+            st.error("download failed")
 
         st.write("Download complete")
         st.write("downloaded_files:")
