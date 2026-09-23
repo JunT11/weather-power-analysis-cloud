@@ -1,115 +1,239 @@
 # -*- coding: utf-8 -*-
+
 """
 Google Drive モデルダウンロード機能
-
-Streamlit Cloud での起動時に Google Drive からモデルを自動ダウンロードします
 """
 
 import streamlit as st
 import gdown
 from pathlib import Path
-import os
 import shutil
+import traceback
+import os
 
-# Google Drive フォルダID（weather-models フォルダ全体）
+# Google Drive フォルダID
 GDRIVE_WEATHER_MODELS_FOLDER_ID = "11CrLEAr_ljmYx1Ib5TPpWG_kvwDElNgS"
+
 
 @st.cache_resource
 def download_models_from_gdrive():
-    """
-    Google Drive からモデルをダウンロード
-    初回のみダウンロード、以降はキャッシュから使用
-    
-    このフォルダの構造:
-    weather-models/
-    ├── models/
-    ├── Weather_Model/
-    └── Combine_Model/
-    """
+
     BASE_DIR = Path(__file__).resolve().parent
     temp_dir = BASE_DIR / ".gdrive_temp"
-    
+
     try:
-        st.info("📥 Google Drive からモデルをダウンロード中...（初回のみ、5-10分かかります）")
-        
-        # 一時ディレクトリにダウンロード
-        gdown.download_folder(
+
+        st.info(
+            "📥 Google Drive からモデルをダウンロード中...（初回のみ）"
+        )
+
+        # ===== 環境情報 =====
+
+        st.write("=== Environment Info ===")
+        st.write("gdown version:", gdown.__version__)
+        st.write("BASE_DIR:", str(BASE_DIR))
+        st.write("TEMP_DIR:", str(temp_dir))
+        st.write("Folder ID:", GDRIVE_WEATHER_MODELS_FOLDER_ID)
+
+        # ===== ディスク容量 =====
+
+        total, used, free = shutil.disk_usage(BASE_DIR)
+
+        st.write("=== Disk Usage ===")
+        st.write(f"Total : {total / (1024**3):.2f} GB")
+        st.write(f"Used  : {used / (1024**3):.2f} GB")
+        st.write(f"Free  : {free / (1024**3):.2f} GB")
+
+        # ===== temp削除 =====
+
+        if temp_dir.exists():
+            st.write("Removing old temp directory...")
+            shutil.rmtree(temp_dir)
+
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
+        st.write("Temp directory created")
+
+        # ===== ダウンロード開始 =====
+
+        st.write("Starting gdown.download_folder() ...")
+
+        downloaded_files = gdown.download_folder(
             id=GDRIVE_WEATHER_MODELS_FOLDER_ID,
             output=str(temp_dir),
             quiet=False,
-            use_cookies=False,
-            verify=False  # SSL 検証を無効化（Streamlit Cloud 対応）
+            use_cookies=False
         )
-        
-        # ダウンロードしたフォルダから models/, Weather_Model/, Combine_Model/ を抽出
+
+        st.write("Download complete")
+        st.write("downloaded_files:")
+        st.write(downloaded_files)
+
+        if downloaded_files is None:
+            raise Exception(
+                "gdown.download_folder() returned None"
+            )
+
+        st.write(
+            f"Downloaded file count: {len(downloaded_files)}"
+        )
+
+        # ===== temp_dir確認 =====
+
+        st.write("=== Downloaded Contents ===")
+
+        for root, dirs, files in os.walk(temp_dir):
+
+            st.write(f"DIR: {root}")
+
+            for d in dirs:
+                st.write(f"   [DIR ] {d}")
+
+            for f in files:
+                st.write(f"   [FILE] {f}")
+
+        # ===== フォルダ位置特定 =====
+
         weather_models_dir = temp_dir / "weather-models"
-        
+
         if weather_models_dir.exists():
             source_dir = weather_models_dir
+            st.write(
+                "Found weather-models folder"
+            )
         else:
             source_dir = temp_dir
-        
-        # 各フォルダを移動
-        for folder_name in ["models", "Weather_Model", "Combine_Model"]:
+            st.write(
+                "weather-models folder not found. Using temp_dir"
+            )
+
+        # ===== コピー =====
+
+        for folder_name in [
+            "models",
+            "Weather_Model",
+            "Combine_Model"
+        \]:
+
             src = source_dir / folder_name
             dst = BASE_DIR / folder_name
-            
-            if src.exists() and not dst.exists():
-                shutil.move(str(src), str(dst))
-                st.success(f"✅ {folder_name} をダウンロード完了")
-        
-        # 一時ディレクトリを削除
+
+            st.write(
+                f"Checking folder: {folder_name}"
+            )
+
+            st.write(f"src = {src}")
+            st.write(f"dst = {dst}")
+
+            if src.exists():
+
+                st.write(
+                    f"Source exists: {folder_name}"
+                )
+
+                if not dst.exists():
+
+                    shutil.move(
+                        str(src),
+                        str(dst)
+                    )
+
+                    st.success(
+                        f"✅ {folder_name} を配置"
+                    )
+                else:
+                    st.warning(
+                        f"{folder_name} already exists"
+                    )
+
+            else:
+
+                st.error(
+                    f"Source folder not found: {src}"
+                )
+
+        # ===== temp削除 =====
+
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
-        
-        st.success("🎉 すべてのモデルをダウンロードしました！")
+
+        st.success(
+            "🎉 モデルダウンロード完了"
+        )
+
         return True
-        
+
     except Exception as e:
-        st.error(f"❌ ダウンロード中にエラーが発生しました: {str(e)}")
-        st.error("ローカルで実行するか、ネットワーク接続を確認してください。")
-        
-        # 一時ディレクトリをクリーンアップ
+
+        st.error("❌ ダウンロード失敗")
+
+        st.error(f"Exception Type: {type(e)}")
+        st.error(f"Exception Message: {str(e)}")
+
+        st.code(traceback.format_exc())
+
         if temp_dir.exists():
+
             try:
                 shutil.rmtree(temp_dir)
-            except:
+            except Exception:
                 pass
-        
+
         return False
 
 
 def setup_models():
-    """
-    モデルセットアップ（起動時に実行）
-    
-    モデルフォルダが存在しない場合、Google Drive からダウンロードします
-    """
+
     BASE_DIR = Path(__file__).resolve().parent
-    
-    # 3つのフォルダすべてが存在するかチェック
+
     models_exist = (
-        (BASE_DIR / "models").exists() and
-        (BASE_DIR / "Weather_Model").exists() and
+        (BASE_DIR / "models").exists()
+        and
+        (BASE_DIR / "Weather_Model").exists()
+        and
         (BASE_DIR / "Combine_Model").exists()
     )
-    
+
+    st.write("=== Setup Models ===")
+
+    st.write(
+        "models:",
+        (BASE_DIR / "models").exists()
+    )
+
+    st.write(
+        "Weather_Model:",
+        (BASE_DIR / "Weather_Model").exists()
+    )
+
+    st.write(
+        "Combine_Model:",
+        (BASE_DIR / "Combine_Model").exists()
+    )
+
     if not models_exist:
-        st.warning("⚠️ モデルが見つかりません。Google Drive からダウンロードしています...")
-        
+
+        st.warning(
+            "⚠️ モデルが存在しません"
+        )
+
         success = download_models_from_gdrive()
-        
+
         if not success:
-            st.error("❌ モデルのダウンロードに失敗しました")
-            st.info("💡 ローカルで実行する場合は、models/, Weather_Model/, Combine_Model/ が存在することを確認してください")
+
+            st.error(
+                "❌ モデルダウンロード失敗"
+            )
+
             st.stop()
+
     else:
-        # モデルが存在する場合は何もしない（ログは出さない）
-        pass
+
+        st.success(
+            "✅ モデルは既に存在します"
+        )
 
 
 if __name__ == "__main__":
-    # テスト用：直接実行時にモデルをダウンロード
     setup_models()
-    print("✅ モデルセットアップ完了")
-
+    print("完了")
