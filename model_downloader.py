@@ -37,7 +37,8 @@ def download_models_from_gdrive():
             id=GDRIVE_WEATHER_MODELS_FOLDER_ID,
             output=str(temp_dir),
             quiet=False,
-            use_cookies=False
+            use_cookies=False,
+            verify=False  # SSL 検証を無効化（Streamlit Cloud 対応）
         )
         
         # ダウンロードしたフォルダから models/, Weather_Model/, Combine_Model/ を抽出
