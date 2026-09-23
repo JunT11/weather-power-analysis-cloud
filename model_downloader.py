@@ -11,6 +11,10 @@ import shutil
 import traceback
 import os
 
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+
 # Google Drive フォルダID
 GDRIVE_WEATHER_MODELS_FOLDER_ID = "11CrLEAr_ljmYx1Ib5TPpWG_kvwDElNgS"
 
@@ -165,12 +169,23 @@ def download_models_from_gdrive():
 
     except Exception as e:
 
-        st.error("❌ ダウンロード失敗")
+        st.error(type(e))
+        st.error(str(e))
 
-        st.error(f"Exception Type: {type(e)}")
-        st.error(f"Exception Message: {str(e)}")
+        if hasattr(e, "__cause__"):
+            st.write("CAUSE =", repr(e.__cause__))
+
+        if hasattr(e, "__context__"):
+            st.write("CONTEXT =", repr(e.__context__))
 
         st.code(traceback.format_exc())
+
+        #st.error("❌ ダウンロード失敗")
+
+        #st.error(f"Exception Type: {type(e)}")
+        #st.error(f"Exception Message: {str(e)}")
+
+        #st.code(traceback.format_exc())
 
         if temp_dir.exists():
 
