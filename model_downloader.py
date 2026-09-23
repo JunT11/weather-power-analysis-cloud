@@ -113,7 +113,7 @@ def download_models_from_gdrive():
             "models",
             "Weather_Model",
             "Combine_Model"
-        \]:
+        ]:
 
             src = source_dir / folder_name
             dst = BASE_DIR / folder_name
