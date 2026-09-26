@@ -2,24 +2,21 @@
 
 """
 Google Drive モデルダウンロード機能
+Streamlit Cloud対応版
 
-Google Drive:
-weather-models
-├── models
-├── Weather_Model
-└── Combine_Model
-
-機能:
-- Google Drive フォルダからモデルをダウンロード
-- 1ファイルずつ処理
-- 失敗時は最大3回リトライ
-- Streamlit の進捗バーを表示
-- 途中まで成功したファイルは再利用
-- 日本語ファイル名に対応
+特徴
+------
+・Google Driveフォルダ内のファイルを1個ずつダウンロード
+・1ファイルにつき最大3回リトライ
+・進捗表示
+・日本語ファイル名対応
+・models / Weather_Model / Combine_Model の構成を維持
+・失敗したファイルを最後に一覧表示
 """
 
 import streamlit as st
 import gdown
+
 from pathlib import Path
 import shutil
 import traceback
@@ -28,151 +25,230 @@ import time
 
 
 # ============================================================
-# Google Drive
+# Google Drive フォルダID
 # ============================================================
 
-# weather-models フォルダのID
 GDRIVE_WEATHER_MODELS_FOLDER_ID = (
     "11CrLEAr_ljmYx1Ib5TPpWG_kvwDElNgS"
 )
 
-# リトライ回数
-MAX_RETRIES = 3
 
-# リトライ間隔（秒）
-RETRY_WAIT_SECONDS = 3
+# ============================================================
+# 設定
+# ============================================================
+
+MAX_RETRY = 3
+
+# Google Drive上のフォルダ構成
+TARGET_FOLDERS = [
+    "models",
+    "Weather_Model",
+    "Combine_Model",
+]
 
 
 # ============================================================
-# Google Drive フォルダのファイル一覧を取得
+# Streamlit表示用
 # ============================================================
 
-def get_drive_file_list(folder_id):
+def log(message):
     """
-    Google Drive フォルダ内のファイル一覧を取得する。
+    Streamlit画面にメッセージを表示
+    """
+    st.write(message)
 
-    gdown.download_folder() の内部処理を利用して
-    一度ファイル一覧を取得する。
+
+# ============================================================
+# ファイルサイズ取得
+# ============================================================
+
+def get_file_size(path):
+    """
+    ファイルサイズをMBで返す
     """
 
     try:
 
-        # download_folder を使用して一覧を取得
-        # 実際のダウンロードは後で個別に行う
-        #
-        # gdown の仕様上、完全なファイルID一覧取得APIが
-        # 公開されていないため、まず download_folder を
-        # 使用して構造を取得する。
-        #
-        # この関数は現在使用しない。
+        size = Path(path).stat().st_size
 
-        return []
+        return size / (1024 * 1024)
 
     except Exception:
+
+        return 0
+
+
+# ============================================================
+# Google Drive ファイル一覧取得
+# ============================================================
+
+def get_google_drive_file_list(folder_id):
+    """
+    Google Driveフォルダ内のファイル一覧を取得
+
+    gdownのfolder URLから一覧を取得する方式。
+    """
+
+    import requests
+    import re
+
+    log("Google Drive フォルダ内のファイル一覧を取得しています...")
+
+    folder_url = (
+        f"https://drive.google.com/drive/folders/{folder_id}"
+    )
+
+    try:
+
+        response = requests.get(
+            folder_url,
+            timeout=30
+        )
+
+        response.raise_for_status()
+
+        html = response.text
+
+        log(
+            f"Google Driveへの接続成功 "
+            f"(HTTP {response.status_code})"
+        )
+
+        # ----------------------------------------------------
+        # Google Drive HTMLからファイルIDを抽出
+        # ----------------------------------------------------
+
+        file_ids = re.findall(
+            r'"([a-zA-Z0-9_-]{20,})"',
+            html
+        )
+
+        # 重複削除
+        file_ids = list(dict.fromkeys(file_ids))
+
+        log(
+            f"検出されたID候補数: {len(file_ids)}"
+        )
+
+        return file_ids
+
+    except Exception as e:
+
+        log(
+            f"❌ Google Drive一覧取得エラー: {e}"
+        )
 
         return []
 
 
 # ============================================================
-# 1ファイルをダウンロード
+# gdownによるファイルダウンロード
 # ============================================================
 
 def download_single_file(
     file_id,
     output_path,
-    file_name
+    display_name
 ):
     """
-    1ファイルを最大3回までリトライしてダウンロードする。
+    1ファイルを最大3回ダウンロード
     """
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    output_path = Path(output_path)
+
+    for attempt in range(1, MAX_RETRY + 1):
 
         try:
 
-            st.write(
-                f"📥 {file_name} "
-                f"（{attempt}/{MAX_RETRIES}回目）"
+            log(
+                f"📥 {display_name}"
             )
 
-            # 出力先ディレクトリ
-            output_path.parent.mkdir(
-                parents=True,
-                exist_ok=True
+            log(
+                f"   試行 {attempt}/{MAX_RETRY}"
             )
+
+            # ------------------------------------------------
+            # 既存ファイルがあれば削除
+            # ------------------------------------------------
+
+            if output_path.exists():
+
+                try:
+                    output_path.unlink()
+
+                except Exception:
+                    pass
+
+            # ------------------------------------------------
+            # ダウンロード
+            # ------------------------------------------------
 
             result = gdown.download(
                 id=file_id,
                 output=str(output_path),
                 quiet=False,
-                fuzzy=False
+                fuzzy=True
             )
 
             # ------------------------------------------------
-            # ダウンロード確認
+            # 成功確認
             # ------------------------------------------------
 
-            if result is not None:
+            if result is not None and output_path.exists():
 
-                if output_path.exists():
-
-                    file_size = (
-                        output_path.stat().st_size
-                    )
-
-                    if file_size > 0:
-
-                        st.success(
-                            f"✅ {file_name} "
-                            f"({file_size / (1024**2):.2f} MB)"
-                        )
-
-                        return True
-
-            raise Exception(
-                "ファイルが作成されませんでした"
-            )
-
-        except Exception as e:
-
-            st.warning(
-                f"⚠️ {file_name} "
-                f"ダウンロード失敗 "
-                f"({attempt}/{MAX_RETRIES})"
-            )
-
-            st.write(
-                f"エラー: {e}"
-            )
-
-            # ------------------------------------------------
-            # 最終試行でなければ待機
-            # ------------------------------------------------
-
-            if attempt < MAX_RETRIES:
-
-                st.write(
-                    f"⏳ {RETRY_WAIT_SECONDS}秒後に再試行..."
+                size_mb = get_file_size(
+                    output_path
                 )
 
-                time.sleep(
-                    RETRY_WAIT_SECONDS
+                log(
+                    f"   ✅ ダウンロード成功 "
+                    f"({size_mb:.2f} MB)"
                 )
+
+                return True
 
             else:
 
-                st.error(
-                    f"❌ {file_name} "
-                    f"ダウンロード失敗"
+                log(
+                    "   ⚠️ ダウンロード結果を確認できません"
                 )
 
-                return False
+        except Exception as e:
+
+            log(
+                f"   ⚠️ エラー: {type(e).__name__}"
+            )
+
+            log(
+                f"   {str(e)}"
+            )
+
+        # ----------------------------------------------------
+        # リトライ
+        # ----------------------------------------------------
+
+        if attempt < MAX_RETRY:
+
+            log(
+                "   ⏳ 10秒後にリトライします..."
+            )
+
+            time.sleep(10)
+
+    # --------------------------------------------------------
+    # 3回失敗
+    # --------------------------------------------------------
+
+    log(
+        f"   ❌ 3回とも失敗: {display_name}"
+    )
 
     return False
 
 
 # ============================================================
-# Google Drive からモデルをダウンロード
+# Google Driveからモデルをダウンロード
 # ============================================================
 
 @st.cache_resource
@@ -194,12 +270,12 @@ def download_models_from_gdrive():
             "📥 Google Drive からモデルをダウンロード中..."
         )
 
-        st.write(
+        st.info(
             "初回のみ時間がかかる場合があります。"
         )
 
         # ====================================================
-        # 環境情報
+        # Environment Info
         # ====================================================
 
         st.write(
@@ -227,11 +303,11 @@ def download_models_from_gdrive():
         )
 
         # ====================================================
-        # ディスク容量
+        # Disk Usage
         # ====================================================
 
-        total, used, free = (
-            shutil.disk_usage(BASE_DIR)
+        total, used, free = shutil.disk_usage(
+            BASE_DIR
         )
 
         st.write(
@@ -244,17 +320,31 @@ def download_models_from_gdrive():
         )
 
         st.write(
-            f"Used  : "
+            f"Used : "
             f"{used / (1024**3):.2f} GB"
         )
 
         st.write(
-            f"Free  : "
+            f"Free : "
             f"{free / (1024**3):.2f} GB"
         )
 
         # ====================================================
-        # 一時フォルダ
+        # 空き容量チェック
+        # ====================================================
+
+        free_gb = free / (1024**3)
+
+        if free_gb < 5:
+
+            st.error(
+                "❌ ディスク空き容量が5GB未満です。"
+            )
+
+            return False
+
+        # ====================================================
+        # TEMP削除
         # ====================================================
 
         if TEMP_DIR.exists():
@@ -264,7 +354,8 @@ def download_models_from_gdrive():
             )
 
             shutil.rmtree(
-                TEMP_DIR
+                TEMP_DIR,
+                ignore_errors=True
             )
 
         TEMP_DIR.mkdir(
@@ -277,8 +368,13 @@ def download_models_from_gdrive():
         )
 
         # ====================================================
-        # Google Drive のファイル一覧取得
+        # Google DriveフォルダURL
         # ====================================================
+
+        folder_url = (
+            "https://drive.google.com/drive/folders/"
+            f"{GDRIVE_WEATHER_MODELS_FOLDER_ID}"
+        )
 
         st.write(
             "=== Google Drive File List ==="
@@ -288,16 +384,14 @@ def download_models_from_gdrive():
             "Google Drive フォルダを確認しています..."
         )
 
+        st.write(
+            folder_url
+        )
+
         # ====================================================
         # 重要
         #
-        # gdown.download_folder() はファイルID一覧を
-        # 外部に返してくれないため、
-        # まずフォルダを取得して各ファイルの結果を
-        # 利用する。
-        #
-        # 途中失敗したファイルについては、
-        # gdown のエラー情報を利用する。
+        # gdown.download_folder() は使わない
         # ====================================================
 
         st.write(
@@ -305,248 +399,584 @@ def download_models_from_gdrive():
         )
 
         # ====================================================
-        # まず通常のフォルダダウンロードを実行
+        # Google DriveフォルダのHTML取得
+        # ====================================================
+
+        import requests
+        import re
+
+        try:
+
+            response = requests.get(
+                folder_url,
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+        except Exception as e:
+
+            st.error(
+                "❌ Google Driveフォルダへの接続に失敗しました"
+            )
+
+            st.error(
+                str(e)
+            )
+
+            return False
+
+        html = response.text
+
+        st.success(
+            "Google Driveフォルダへの接続成功"
+        )
+
+        # ====================================================
+        # ファイル情報抽出
+        # ====================================================
+
+        st.write(
+            "Google Driveからファイル情報を取得しています..."
+        )
+
+        # ----------------------------------------------------
+        # Google DriveのHTMLからID候補を取得
+        # ----------------------------------------------------
+
+        file_ids = re.findall(
+            r'"([a-zA-Z0-9_-]{20,})"',
+            html
+        )
+
+        file_ids = list(
+            dict.fromkeys(file_ids)
+        )
+
+        # フォルダID自身を除外
+        file_ids = [
+            x
+            for x in file_ids
+            if x != GDRIVE_WEATHER_MODELS_FOLDER_ID
+        ]
+
+        st.write(
+            f"検出されたID候補: {len(file_ids)}"
+        )
+
+        # ====================================================
+        # 注意
+        # ====================================================
+
+        if not file_ids:
+
+            st.error(
+                "❌ Google DriveからファイルIDを取得できませんでした。"
+            )
+
+            st.warning(
+                "Google Driveフォルダが「リンクを知っている全員」に"
+                "公開されているか確認してください。"
+            )
+
+            return False
+
+        # ====================================================
+        # ここから実際のダウンロード
+        # ====================================================
+
+        st.write(
+            "=== Download Start ==="
+        )
+
+        st.write(
+            f"ファイルID候補数: {len(file_ids)}"
+        )
+
+        # ====================================================
+        # 重要
         #
-        # ここでは例外を握りつぶさず、
-        # 途中まで成功したファイルを残す。
+        # Google Drive HTMLからファイル名とIDを
+        # 完全に対応させるのは難しいため、
+        # 今回はgdown.download_folder()の問題を
+        # 回避するための方式として、
+        # まずフォルダ単位の取得を試す。
+        #
+        # ただしdownload_folder()は使わない。
+        # ====================================================
+
+        # ====================================================
+        # 実際にはGoogle Drive APIなしでは
+        # フォルダ内の「名前→ID」を完全取得できない場合がある
+        # ====================================================
+
+        st.warning(
+            "⚠️ Google Driveの公開フォルダから"
+            "ファイル名とIDの完全な対応取得を行います。"
+        )
+
+        # ====================================================
+        # gdown.download_folder()を使わずに
+        # Google Driveのファイル一覧を取得する
+        # ====================================================
+
+        # Google Driveのページに埋め込まれている
+        # ファイルIDとファイル名を検索
+        #
+        # ファイル名がHTMLに存在する場合の処理
+        # ====================================================
+
+        downloaded = 0
+        failed = []
+
+        # ----------------------------------------------------
+        # 対象フォルダ
+        # ----------------------------------------------------
+
+        for target_folder in TARGET_FOLDERS:
+
+            st.write(
+                f"## {target_folder}"
+            )
+
+            target_dir = (
+                TEMP_DIR / target_folder
+            )
+
+            target_dir.mkdir(
+                parents=True,
+                exist_ok=True
+            )
+
+        # ====================================================
+        # ここでGoogle Drive API方式を使用
         # ====================================================
 
         try:
 
-            downloaded_files = (
-                gdown.download_folder(
-                    id=GDRIVE_WEATHER_MODELS_FOLDER_ID,
-                    output=str(TEMP_DIR),
-                    quiet=False,
-                    use_cookies=False
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+
+            st.write(
+                "Google Drive APIを確認しています..."
+            )
+
+            # ------------------------------------------------
+            # Streamlit Secretsからサービスアカウント取得
+            # ------------------------------------------------
+
+            if "gdrive" not in st.secrets:
+
+                raise Exception(
+                    "Streamlit Secretsに [gdrive] "
+                    "設定がありません"
+                )
+
+            credentials_info = dict(
+                st.secrets["gdrive"]
+            )
+
+            credentials = (
+                service_account
+                .Credentials
+                .from_service_account_info(
+                    credentials_info,
+                    scopes=[
+                        "https://www.googleapis.com/auth/drive.readonly"
+                    ]
                 )
             )
 
+            service = build(
+                "drive",
+                "v3",
+                credentials=credentials
+            )
+
             st.success(
-                "Google Drive フォルダの取得が完了しました"
+                "Google Drive API接続成功"
             )
 
         except Exception as e:
 
-            st.warning(
-                "⚠️ 一部ファイルの取得に失敗しました"
+            st.error(
+                "❌ Google Drive API接続に失敗しました"
             )
 
-            st.write(
-                "エラー:",
+            st.error(
                 str(e)
             )
 
-            downloaded_files = None
+            st.info(
+                "Streamlit SecretsにGoogle Drive APIの"
+                "サービスアカウント設定が必要です。"
+            )
+
+            return False
 
         # ====================================================
-        # ダウンロード済みファイルを確認
+        # フォルダ階層を取得
+        # ====================================================
+
+        def get_children(parent_id):
+
+            query = (
+                f"'{parent_id}' in parents "
+                "and trashed = false"
+            )
+
+            results = []
+
+            page_token = None
+
+            while True:
+
+                response = service.files().list(
+
+                    q=query,
+
+                    fields=(
+                        "nextPageToken,"
+                        "files(id,name,mimeType,size)"
+                    ),
+
+                    pageSize=1000,
+
+                    pageToken=page_token
+
+                ).execute()
+
+                results.extend(
+                    response.get(
+                        "files",
+                        []
+                    )
+                )
+
+                page_token = (
+                    response.get(
+                        "nextPageToken"
+                    )
+                )
+
+                if not page_token:
+                    break
+
+            return results
+
+        # ====================================================
+        # weather-models フォルダ内取得
+        # ====================================================
+
+        st.write(
+            "weather-models フォルダを検索しています..."
+        )
+
+        root_items = get_children(
+            GDRIVE_WEATHER_MODELS_FOLDER_ID
+        )
+
+        st.write(
+            f"weather-models直下: "
+            f"{len(root_items)} 件"
+        )
+
+        # ====================================================
+        # 各フォルダを取得
+        # ====================================================
+
+        all_files = []
+
+        for item in root_items:
+
+            if (
+                item["mimeType"]
+                == "application/vnd.google-apps.folder"
+            ):
+
+                folder_name = item["name"]
+
+                if folder_name in TARGET_FOLDERS:
+
+                    st.write(
+                        f"📁 {folder_name}"
+                    )
+
+                    children = get_children(
+                        item["id"]
+                    )
+
+                    st.write(
+                        f"   {len(children)} ファイル"
+                    )
+
+                    for child in children:
+
+                        if (
+                            child["mimeType"]
+                            != "application/vnd.google-apps.folder"
+                        ):
+
+                            all_files.append({
+
+                                "id": child["id"],
+
+                                "name": child["name"],
+
+                                "folder": folder_name,
+
+                                "size": child.get(
+                                    "size",
+                                    0
+                                )
+
+                            })
+
+        # ====================================================
+        # ファイル数
+        # ====================================================
+
+        total_files = len(
+            all_files
+        )
+
+        st.write(
+            f"=== ダウンロード対象 ==="
+        )
+
+        st.write(
+            f"合計 {total_files} ファイル"
+        )
+
+        if total_files == 0:
+
+            st.error(
+                "❌ ダウンロード対象ファイルがありません。"
+            )
+
+            return False
+
+        # ====================================================
+        # 進捗バー
+        # ====================================================
+
+        progress = st.progress(
+            0
+        )
+
+        status = st.empty()
+
+        # ====================================================
+        # 1ファイルずつダウンロード
+        # ====================================================
+
+        for index, file_info in enumerate(
+            all_files,
+            start=1
+        ):
+
+            file_id = file_info["id"]
+
+            file_name = file_info["name"]
+
+            folder_name = file_info["folder"]
+
+            output_dir = (
+                TEMP_DIR / folder_name
+            )
+
+            output_path = (
+                output_dir / file_name
+            )
+
+            # ------------------------------------------------
+            # 進捗表示
+            # ------------------------------------------------
+
+            percent = (
+                (index - 1)
+                / total_files
+            )
+
+            progress.progress(
+                percent
+            )
+
+            status.write(
+                f"### "
+                f"[{index}/{total_files}] "
+                f"{folder_name}/{file_name}"
+            )
+
+            # ------------------------------------------------
+            # サイズ
+            # ------------------------------------------------
+
+            size = file_info.get(
+                "size",
+                0
+            )
+
+            try:
+
+                size_mb = (
+                    int(size)
+                    / (1024 * 1024)
+                )
+
+            except Exception:
+
+                size_mb = 0
+
+            st.write(
+                f"📦 {folder_name}/"
+                f"{file_name} "
+                f"({size_mb:.2f} MB)"
+            )
+
+            # ------------------------------------------------
+            # ダウンロード
+            # ------------------------------------------------
+
+            success = download_single_file(
+
+                file_id=file_id,
+
+                output_path=output_path,
+
+                display_name=(
+                    f"{folder_name}/"
+                    f"{file_name}"
+                )
+
+            )
+
+            if success:
+
+                downloaded += 1
+
+            else:
+
+                failed.append(
+                    {
+                        "folder":
+                            folder_name,
+
+                        "name":
+                            file_name,
+
+                        "id":
+                            file_id
+                    }
+                )
+
+        # ====================================================
+        # 100%
+        # ====================================================
+
+        progress.progress(
+            1.0
+        )
+
+        status.write(
+            "ダウンロード処理完了"
+        )
+
+        # ====================================================
+        # 結果
+        # ====================================================
+
+        st.write(
+            "=== Download Result ==="
+        )
+
+        st.write(
+            f"成功: {downloaded}"
+        )
+
+        st.write(
+            f"失敗: {len(failed)}"
+        )
+
+        # ====================================================
+        # 失敗ファイル
+        # ====================================================
+
+        if failed:
+
+            st.error(
+                "❌ 一部ファイルのダウンロードに失敗しました"
+            )
+
+            st.write(
+                "=== Failed Files ==="
+            )
+
+            for item in failed:
+
+                st.write(
+                    f"- "
+                    f"{item['folder']}/"
+                    f"{item['name']}"
+                )
+
+            st.warning(
+                "失敗したファイルがあるため、"
+                "モデル配置は実行しません。"
+            )
+
+            return False
+
+        # ====================================================
+        # すべて成功
+        # ====================================================
+
+        st.success(
+            "🎉 すべてのファイルの"
+            "ダウンロードに成功しました"
+        )
+
+        # ====================================================
+        # ファイル確認
         # ====================================================
 
         st.write(
             "=== Downloaded Contents ==="
         )
 
-        downloaded_file_paths = []
-
-        for root, dirs, files in os.walk(
-            TEMP_DIR
-        ):
-
-            for file_name in files:
-
-                file_path = (
-                    Path(root) / file_name
-                )
-
-                downloaded_file_paths.append(
-                    file_path
-                )
-
-        st.write(
-            f"現在取得できているファイル数: "
-            f"{len(downloaded_file_paths)}"
-        )
-
-        # ====================================================
-        # ディレクトリ構造確認
-        # ====================================================
-
-        st.write(
-            "=== Directory Structure ==="
-        )
-
-        for root, dirs, files in os.walk(
-            TEMP_DIR
-        ):
-
-            relative_root = (
-                Path(root).relative_to(TEMP_DIR)
-            )
-
-            st.write(
-                f"📁 {relative_root}"
-            )
-
-            for file_name in files:
-
-                st.write(
-                    f"   └── {file_name}"
-                )
-
-        # ====================================================
-        # weather-models フォルダ
-        # ====================================================
-
-        weather_models_dir = (
-            TEMP_DIR / "weather-models"
-        )
-
-        if weather_models_dir.exists():
-
-            source_dir = (
-                weather_models_dir
-            )
-
-            st.write(
-                "✅ weather-models フォルダを検出"
-            )
-
-        else:
-
-            source_dir = TEMP_DIR
-
-            st.write(
-                "weather-models フォルダは"
-                "作成されていません"
-            )
-
-        # ====================================================
-        # 必要なモデル
-        # ====================================================
-
-        required_folders = [
-            "models",
-            "Weather_Model",
-            "Combine_Model"
-        ]
-
-        # ====================================================
-        # モデルフォルダ確認
-        # ====================================================
-
-        st.write(
-            "=== Model Folder Check ==="
-        )
-
-        folder_results = {}
-
-        for folder_name in required_folders:
+        for target_folder in TARGET_FOLDERS:
 
             folder_path = (
-                source_dir / folder_name
+                TEMP_DIR / target_folder
             )
 
-            exists = (
-                folder_path.exists()
-                and folder_path.is_dir()
+            files = list(
+                folder_path.rglob("*")
             )
 
-            folder_results[
-                folder_name
-            ] = exists
-
-            if exists:
-
-                file_count = sum(
-                    1
-                    for _ in folder_path.rglob("*")
-                    if _.is_file()
-                )
-
-                st.success(
-                    f"✅ {folder_name}: "
-                    f"{file_count} files"
-                )
-
-            else:
-
-                st.error(
-                    f"❌ {folder_name}: "
-                    f"見つかりません"
-                )
-
-        # ====================================================
-        # 全フォルダが揃っているか
-        # ====================================================
-
-        all_folders_exist = all(
-            folder_results.values()
-        )
-
-        if not all_folders_exist:
-
-            st.error(
-                "❌ 必要なモデルフォルダが"
-                "揃っていません"
-            )
-
-            st.warning(
-                "Google Driveから一部ファイルを"
-                "取得できていない可能性があります。"
-            )
-
-            return False
-
-        # ====================================================
-        # ファイル数確認
-        # ====================================================
-
-        total_model_files = 0
-
-        for folder_name in required_folders:
-
-            folder_path = (
-                source_dir / folder_name
-            )
-
-            count = sum(
+            file_count = sum(
                 1
-                for _ in folder_path.rglob("*")
-                if _.is_file()
+                for f in files
+                if f.is_file()
             )
 
-            total_model_files += count
+            st.write(
+                f"{target_folder}: "
+                f"{file_count} files"
+            )
+
+        # ====================================================
+        # モデル配置
+        # ====================================================
 
         st.write(
-            "=== Download Summary ==="
+            "=== Model Installation ==="
         )
 
-        st.write(
-            f"モデルファイル総数: "
-            f"{total_model_files}"
-        )
-
-        # ====================================================
-        # 進捗バー
-        # ====================================================
-
-        progress_bar = st.progress(
-            0
-        )
-
-        progress_text = st.empty()
-
-        # ====================================================
-        # モデルを配置
-        # ====================================================
-
-        processed = 0
-
-        for folder_name in required_folders:
+        for folder_name in TARGET_FOLDERS:
 
             src = (
-                source_dir / folder_name
+                TEMP_DIR / folder_name
             )
 
             dst = (
@@ -554,124 +984,49 @@ def download_models_from_gdrive():
             )
 
             st.write(
-                f"=== {folder_name} ==="
+                f"Installing: "
+                f"{folder_name}"
             )
 
             # ------------------------------------------------
-            # ファイル一覧
+            # 既存フォルダ削除
             # ------------------------------------------------
 
-            files = [
-                path
-                for path in src.rglob("*")
-                if path.is_file()
-            ]
+            if dst.exists():
 
-            for file_path in files:
-
-                relative_path = (
-                    file_path.relative_to(src)
+                st.write(
+                    f"Removing existing: "
+                    f"{dst}"
                 )
 
-                destination = (
-                    dst / relative_path
+                shutil.rmtree(
+                    dst,
+                    ignore_errors=True
                 )
 
-                destination.parent.mkdir(
-                    parents=True,
-                    exist_ok=True
-                )
+            # ------------------------------------------------
+            # 移動
+            # ------------------------------------------------
 
-                # --------------------------------------------
-                # 既に存在している場合
-                # --------------------------------------------
+            shutil.move(
+                str(src),
+                str(dst)
+            )
 
-                if destination.exists():
-
-                    try:
-
-                        src_size = (
-                            file_path.stat().st_size
-                        )
-
-                        dst_size = (
-                            destination.stat().st_size
-                        )
-
-                        if (
-                            src_size == dst_size
-                            and
-                            dst_size > 0
-                        ):
-
-                            processed += 1
-
-                            progress = (
-                                processed
-                                / total_model_files
-                            )
-
-                            progress_bar.progress(
-                                min(
-                                    progress,
-                                    1.0
-                                )
-                            )
-
-                            progress_text.write(
-                                f"⏭️ {processed}/"
-                                f"{total_model_files} "
-                                f"{folder_name}/"
-                                f"{relative_path}"
-                            )
-
-                            continue
-
-                    except Exception:
-
-                        pass
-
-                # --------------------------------------------
-                # ファイルコピー
-                # --------------------------------------------
-
-                shutil.copy2(
-                    file_path,
-                    destination
-                )
-
-                processed += 1
-
-                progress = (
-                    processed
-                    / total_model_files
-                )
-
-                progress_bar.progress(
-                    min(
-                        progress,
-                        1.0
-                    )
-                )
-
-                progress_text.write(
-                    f"📦 {processed}/"
-                    f"{total_model_files} "
-                    f"{folder_name}/"
-                    f"{relative_path}"
-                )
+            st.success(
+                f"✅ {folder_name} を配置しました"
+            )
 
         # ====================================================
-        # 100%
+        # TEMP削除
         # ====================================================
 
-        progress_bar.progress(
-            1.0
-        )
+        if TEMP_DIR.exists():
 
-        progress_text.success(
-            "🎉 モデル配置完了"
-        )
+            shutil.rmtree(
+                TEMP_DIR,
+                ignore_errors=True
+            )
 
         # ====================================================
         # 最終確認
@@ -681,76 +1036,46 @@ def download_models_from_gdrive():
             "=== Final Check ==="
         )
 
-        final_ok = True
+        all_exist = True
 
-        for folder_name in required_folders:
+        for folder_name in TARGET_FOLDERS:
 
             folder_path = (
                 BASE_DIR / folder_name
             )
 
-            if folder_path.exists():
-
-                count = sum(
-                    1
-                    for _ in folder_path.rglob("*")
-                    if _.is_file()
-                )
-
-                st.success(
-                    f"✅ {folder_name}: "
-                    f"{count} files"
-                )
-
-            else:
-
-                st.error(
-                    f"❌ {folder_name}: "
-                    f"not found"
-                )
-
-                final_ok = False
-
-        # ====================================================
-        # temp削除
-        # ====================================================
-
-        if TEMP_DIR.exists():
+            exists = (
+                folder_path.exists()
+            )
 
             st.write(
-                "Cleaning temporary directory..."
+                f"{folder_name}: "
+                f"{exists}"
             )
 
-            shutil.rmtree(
-                TEMP_DIR
-            )
+            if not exists:
 
-        # ====================================================
-        # 結果
-        # ====================================================
+                all_exist = False
 
-        if final_ok:
-
-            st.success(
-                "🎉🎉🎉 "
-                "すべてのモデルの準備が完了しました！"
-            )
-
-            return True
-
-        else:
+        if not all_exist:
 
             st.error(
-                "❌ モデルの配置に失敗しました"
+                "❌ モデルフォルダの配置確認に失敗しました"
             )
 
             return False
 
-    # ========================================================
-    # エラー処理
-    # ========================================================
+        st.success(
+            "🎉 モデルセットアップ完了"
+        )
+
+        return True
 
     except Exception as e:
+
+        # ====================================================
+        # エラー処理
+        # ====================================================
 
         st.error(
             "❌ モデルダウンロード中に"
@@ -769,22 +1094,28 @@ def download_models_from_gdrive():
             traceback.format_exc()
         )
 
-        # ====================================================
-        # 一時フォルダは残す
-        #
-        # デバッグのため、エラー時には削除しない
-        # ====================================================
+        # ----------------------------------------------------
+        # TEMP削除
+        # ----------------------------------------------------
 
-        st.warning(
-            "⚠️ エラー調査のため、"
-            ".gdrive_temp は残しています"
-        )
+        if TEMP_DIR.exists():
+
+            try:
+
+                shutil.rmtree(
+                    TEMP_DIR,
+                    ignore_errors=True
+                )
+
+            except Exception:
+
+                pass
 
         return False
 
 
 # ============================================================
-# モデルの存在確認
+# モデル存在確認
 # ============================================================
 
 def setup_models():
@@ -793,15 +1124,15 @@ def setup_models():
         Path(__file__).resolve().parent
     )
 
-    models_dir = (
+    models_path = (
         BASE_DIR / "models"
     )
 
-    weather_model_dir = (
+    weather_path = (
         BASE_DIR / "Weather_Model"
     )
 
-    combine_model_dir = (
+    combine_path = (
         BASE_DIR / "Combine_Model"
     )
 
@@ -809,30 +1140,13 @@ def setup_models():
     # 存在確認
     # ========================================================
 
-    models_exists = (
-        models_dir.exists()
-        and models_dir.is_dir()
-    )
-
-    weather_exists = (
-        weather_model_dir.exists()
-        and weather_model_dir.is_dir()
-    )
-
-    combine_exists = (
-        combine_model_dir.exists()
-        and combine_model_dir.is_dir()
-    )
-
     models_exist = (
-        models_exists
-        and weather_exists
-        and combine_exists
+        models_path.exists()
+        and
+        weather_path.exists()
+        and
+        combine_path.exists()
     )
-
-    # ========================================================
-    # 表示
-    # ========================================================
 
     st.write(
         "=== Setup Models ==="
@@ -840,94 +1154,76 @@ def setup_models():
 
     st.write(
         "models:",
-        models_exists
+        models_path.exists()
     )
 
     st.write(
         "Weather_Model:",
-        weather_exists
+        weather_path.exists()
     )
 
     st.write(
         "Combine_Model:",
-        combine_exists
+        combine_path.exists()
     )
 
     # ========================================================
-    # モデルがない場合
+    # 既に存在
     # ========================================================
 
-    if not models_exist:
-
-        st.warning(
-            "⚠️ モデルが存在しません"
-        )
-
-        st.write(
-            "Running download_models_from_gdrive()."
-        )
-
-        success = (
-            download_models_from_gdrive()
-        )
-
-        if not success:
-
-            st.error(
-                "❌ モデルダウンロード失敗"
-            )
-
-            st.stop()
-
-        # ----------------------------------------------------
-        # 再確認
-        # ----------------------------------------------------
-
-        models_exists = (
-            models_dir.exists()
-            and models_dir.is_dir()
-        )
-
-        weather_exists = (
-            weather_model_dir.exists()
-            and weather_model_dir.is_dir()
-        )
-
-        combine_exists = (
-            combine_model_dir.exists()
-            and combine_model_dir.is_dir()
-        )
-
-        if not (
-            models_exists
-            and weather_exists
-            and combine_exists
-        ):
-
-            st.error(
-                "❌ モデルフォルダの"
-                "最終確認に失敗しました"
-            )
-
-            st.stop()
-
-        st.success(
-            "✅ モデルの準備が完了しました"
-        )
-
-    # ========================================================
-    # モデルが既に存在する場合
-    # ========================================================
-
-    else:
+    if models_exist:
 
         st.success(
             "✅ モデルは既に存在します"
         )
 
+        return True
+
+    # ========================================================
+    # 存在しない
+    # ========================================================
+
+    st.warning(
+        "⚠️ モデルが存在しません"
+    )
+
+    st.write(
+        "Running download_models_from_gdrive()."
+    )
+
+    # ========================================================
+    # ダウンロード
+    # ========================================================
+
+    success = (
+        download_models_from_gdrive()
+    )
+
+    # ========================================================
+    # 失敗
+    # ========================================================
+
+    if not success:
+
+        st.error(
+            "❌ モデルダウンロード失敗"
+        )
+
+        st.stop()
+
+    # ========================================================
+    # 成功
+    # ========================================================
+
+    st.success(
+        "🎉 モデルセットアップ成功"
+    )
+
+    return True
+
 
 # ============================================================
-# 直接実行
+# Main
 # ============================================================
 
 if __name__ == "__main__":
