@@ -800,7 +800,7 @@ def main():
                     height=500
                 )
                 
-                st.plotly_chart(fig, width='stretch')
+                st.plotly_chart(fig, use_container_width=True)
                 
                 # 発電データがある場合は表示
                 power_cols = ['原子力', '火力_合計', '太陽光発電実績']
@@ -890,7 +890,7 @@ def main():
                             hovermode='x unified',
                             height=400
                         )
-                        st.plotly_chart(fig_weather_1, width='stretch')
+                        st.plotly_chart(fig_weather_1, use_container_width=True)
                         
                         st.subheader(f"{date_1}の電力供給構成")
                         fig1 = go.Figure()
@@ -915,13 +915,13 @@ def main():
                             height=400
                         )
                         
-                        st.plotly_chart(fig1, width='stretch')
+                        st.plotly_chart(fig1, use_container_width=True)
                         
                         # データテーブル
                         st.write(f"**{date_1}のデータ**")
                         display_cols = ['hour'] + available_power_cols
                         display_df = df_cut_1day_1[display_cols].copy()
-                        st.dataframe(display_df, width='stretch', hide_index=True)
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
                     else:
                         st.warning(f"⚠️ {date_1}のデータが見つかりません")
                 
@@ -972,7 +972,7 @@ def main():
                             hovermode='x unified',
                             height=400
                         )
-                        st.plotly_chart(fig_weather_2, width='stretch')
+                        st.plotly_chart(fig_weather_2, use_container_width=True)
                         
                         st.subheader(f"{date_2}の電力供給構成")
                         fig2 = go.Figure()
@@ -997,13 +997,13 @@ def main():
                             height=400
                         )
                         
-                        st.plotly_chart(fig2, width='stretch')
+                        st.plotly_chart(fig2, use_container_width=True)
                         
                         # データテーブル
                         st.write(f"**{date_2}のデータ**")
                         display_cols = ['hour'] + available_power_cols
                         display_df = df_cut_1day_2[display_cols].copy()
-                        st.dataframe(display_df, width='stretch', hide_index=True)
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
                     else:
                         st.warning(f"⚠️ {date_2}のデータが見つかりません")
     
@@ -1102,7 +1102,7 @@ def main():
                     st.warning("⚠️ 無効な日付です（例：2月30日など）")
             
             # 予測ボタン
-            if st.button("🔮 気象を予測", key=f"predict_weather_{location_name}", width='stretch'):
+            if st.button("🔮 気象を予測", key=f"predict_weather_{location_name}", use_container_width=True):
                 try:
                     # モデルをロード
                     models_dict, scaler = load_weather_prediction_models(location_name)
@@ -1204,7 +1204,7 @@ def main():
                             ]
                         })
                         
-                        st.dataframe(result_df, width='stretch', hide_index=True)
+                        st.dataframe(result_df, use_container_width=True, hide_index=True)
                     else:
                         st.error("❌ モデルの読み込みに失敗しました。")
                 
@@ -1324,7 +1324,7 @@ def main():
         # ==================================================================================
         # Section 2-2: Prediction Button & Results
         # ==================================================================================
-        if st.button("🔮 AI予測スタート", key=f"predict_{model_suffix}", width='stretch'):
+        if st.button("🔮 AI予測スタート", key=f"predict_{model_suffix}", use_container_width=True):
             # チェックボックスの状態から、対応するモデルの組み合わせ名を取得
             combination_name = get_model_combination_name(
                 show_nuclear,
@@ -1455,7 +1455,7 @@ def main():
                                     select_weather
                                 ]
                             })
-                            st.dataframe(info_df, width='stretch', hide_index=True)
+                            st.dataframe(info_df, use_container_width=True, hide_index=True)
                         
                         with info_col2:
                             st.write("**予測結果**")
@@ -1464,7 +1464,7 @@ def main():
                             result_df["構成比"] = result_df["発電量(MW)"].apply(
                                 lambda x: f"{(x/total*100):.1f}%" if total > 0 else "0%"
                             )
-                            st.dataframe(result_df, width='stretch', hide_index=True)
+                            st.dataframe(result_df, use_container_width=True, hide_index=True)
                     else:
                         st.error("❌ モデルの読み込みに失敗しました")
                 
@@ -1519,7 +1519,7 @@ def main():
             )
         
         # 予測実行ボタン
-        if st.button("🔮 発電源を予測", key=f"predict_2_2_{model_suffix}", width='stretch'):
+        if st.button("🔮 発電源を予測", key=f"predict_2_2_{model_suffix}", use_container_width=True):
             # モデルをロード
             models_dict, scaler_2_2 = load_power_prediction_models(location_name)
             
@@ -1602,7 +1602,7 @@ def main():
                 font=dict(size=12)
             )
             
-            st.plotly_chart(fig_pie, width='stretch')
+            st.plotly_chart(fig_pie, use_container_width=True)
             
             # 詳細テーブル表示
             st.subheader("📈 詳細結果")
@@ -1627,7 +1627,7 @@ def main():
                 ]
             })
             
-            st.dataframe(result_df, width='stretch', hide_index=True)
+            st.dataframe(result_df, use_container_width=True, hide_index=True)
             
             # 入力条件の表示
             st.subheader("📋 入力条件")
@@ -1640,7 +1640,7 @@ def main():
                 ]
             })
             
-            st.dataframe(info_df, width='stretch', hide_index=True)
+            st.dataframe(info_df, use_container_width=True, hide_index=True)
     
     # ==================================================================================
     # Footer
