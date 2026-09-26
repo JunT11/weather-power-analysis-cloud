@@ -281,62 +281,37 @@ def _run_gdrive_download(result_holder):
     """
     Google Driveダウンロードを別スレッドで実行。
 
-    gdown 6.4.0では
-    download_folder() に remaining_ok を渡さない。
+    gdown 6.4.0対応版。
+    - download_folder() に remaining_ok は指定しない
+    - 通信タイムアウトを30秒に設定
+    - 一時的な通信エラーは3回までリトライ
+    - 途中まで取得したファイルは resume=True で再利用
     """
-
     try:
-
         import gdown
 
         result_holder["started"] = True
+        result_holder["version"] = getattr(gdown, "__version__", "unknown")
 
-        # =========================================================================
-        # 重要
-        # remaining_ok は絶対に指定しない
-        # =========================================================================
-
+        # gdown 6.3以降は download_folder() に timeout / retries / resume
+        # を指定できる。5分間ずっと通信待ちになる問題を避けるため、
+        # 「1回の通信待ち」を30秒に制限し、途中失敗は再試行する。
         downloaded = gdown.download_folder(
             id=GOOGLE_DRIVE_FOLDER_ID,
             output=str(TEMP_DIR),
             quiet=False,
             use_cookies=False,
-            remaining_ok=False,
+            resume=True,
+            timeout=30,
+            retries=3,
         )
 
         result_holder["result"] = downloaded
         result_holder["finished"] = True
 
-    except TypeError as e:
-
-        # -------------------------------------------------------------------------
-        # gdownのバージョン差によるremaining_okエラー対策
-        # -------------------------------------------------------------------------
-
-        try:
-
-            import gdown
-
-            downloaded = gdown.download_folder(
-                id=GOOGLE_DRIVE_FOLDER_ID,
-                output=str(TEMP_DIR),
-                quiet=False,
-                use_cookies=False,
-            )
-
-            result_holder["result"] = downloaded
-            result_holder["finished"] = True
-
-        except Exception as e2:
-
-            result_holder["error"] = str(e2)
-            result_holder["finished"] = True
-
     except Exception as e:
-
-        result_holder["error"] = str(e)
+        result_holder["error"] = f"{type(e).__name__}: {e}"
         result_holder["finished"] = True
-
 
 def download_models_from_gdrive(force=False):
     """
@@ -470,7 +445,9 @@ def download_models_from_gdrive(force=False):
     # タイムアウト監視
     # =========================================================================
 
-    timeout_seconds = 300
+    # 214ファイルを取得するため、全体の制限時間は30分にする。
+    # 各通信そのものは gdown 側の timeout=30 で制御する。
+    timeout_seconds = 1800
 
     start_time = time.time()
 
@@ -501,13 +478,14 @@ def download_models_from_gdrive(force=False):
         if elapsed >= timeout_seconds:
 
             status.error(
-                "❌ Google Driveからの取得が5分以上進まないため停止しました。"
+                "❌ Google Driveからの取得が30分を超えたため停止しました。"
             )
 
             st.warning(
                 "Google Driveフォルダへのアクセスに時間がかかりすぎています。\n\n"
+                "gdownは1回の通信を30秒でタイムアウトし、最大3回リトライします。\n\n"
                 "次を確認してください。\n"
-                "1. Google Driveフォルダが公開されている\n"
+                "1. Google Driveフォルダが「リンクを知っている全員」に公開されている\n"
                 "2. 「リンクを知っている全員」が閲覧可能\n"
                 "3. フォルダ内のモデル数が多すぎない\n"
                 "4. Streamlit CloudからGoogle Driveへアクセスできる"
