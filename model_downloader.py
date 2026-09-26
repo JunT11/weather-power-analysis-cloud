@@ -71,7 +71,7 @@ def download_models_from_gdrive():
         st.write("Single file download test start")
 
         test_file = gdown.download(
-            id="ここにsummary_all.csvのファイルID",
+            id="1lcu2B8s2KdtGEXBPykPwr8dHgGPvLG-3",
             output="summary_all.csv",
             quiet=False
         )
