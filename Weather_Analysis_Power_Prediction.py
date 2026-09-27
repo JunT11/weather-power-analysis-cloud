@@ -279,130 +279,65 @@ def get_existing_model_count():
 
 def _run_gdrive_download(result_holder):
     """
-    Google Driveのフォルダ一覧取得と個別ダウンロードを分離。
+    Google Driveダウンロードを別スレッドで実行。
 
-    gdown 6.4.0対応。
-    フォルダ一覧取得で長時間ハングしないようタイムアウトを設定し、
-    ダウンロード済みファイルは .gdrive_temp に残して再利用する。
+    gdown 6.4.0では
+    download_folder() に remaining_ok を渡さない。
     """
 
     try:
 
-        import requests
         import gdown
-        from gdown.download import download as gdown_download
-        from gdown.download_folder import (
-            _download_and_parse_google_drive_link,
-            _get_directory_structure,
-        )
 
         result_holder["started"] = True
-        result_holder["version"] = getattr(
-            gdown, "__version__", "unknown"
-        )
-        result_holder["stage"] = "フォルダ一覧を取得中"
 
-        # フォルダ一覧取得そのものにタイムアウトを設定。
-        # ここが従来30分近く止まっていた箇所。
-        sess = requests.Session()
-        try:
-            gdrive_file = _download_and_parse_google_drive_link(
-                sess=sess,
-                folder_id=GOOGLE_DRIVE_FOLDER_ID,
-                quiet=True,
-                verify=True,
-                timeout=20,
-            )
-        finally:
-            sess.close()
+        # =========================================================================
+        # 重要
+        # remaining_ok は絶対に指定しない
+        # =========================================================================
 
-        structure = _get_directory_structure(
-            gdrive_file=gdrive_file,
-            previous_path="",
+        downloaded = gdown.download_folder(
+            id=GOOGLE_DRIVE_FOLDER_ID,
+            output=str(TEMP_DIR),
+            quiet=False,
+            use_cookies=False,
+            resume=True,
+            timeout=30,
+            retries=3,
         )
 
-        files = [
-            (file_obj, relative_path)
-            for file_obj, relative_path in structure
-            if file_obj is not None
-        ]
-
-        result_holder["discovered"] = True
-        result_holder["drive_total"] = len(files)
-        result_holder["stage"] = "ファイルをダウンロード中"
-
-        if not files:
-            raise RuntimeError(
-                "Google Driveフォルダからファイルを取得できませんでした。"
-            )
-
-        # 必要ファイルだけを対象にする。
-        required = set(get_required_model_files())
-
-        # Drive側のパス表記をそのまま利用しつつ、
-        # 必要ファイル以外は取得しない。
-        targets = [
-            (file_obj, relative_path)
-            for file_obj, relative_path in files
-            if relative_path in required
-        ]
-
-        result_holder["target_total"] = len(targets)
-
-        if not targets:
-            raise RuntimeError(
-                "Google Driveから必要なモデルファイルを特定できませんでした。"
-            )
-
-        # .gdrive_temp に既にあるファイルは再取得しない。
-        completed = 0
-
-        for file_obj, relative_path in targets:
-
-            local_path = TEMP_DIR / relative_path
-            local_path.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            if local_path.exists() and local_path.is_file() and local_path.stat().st_size > 0:
-                completed += 1
-                result_holder["completed"] = completed
-                result_holder["current"] = relative_path
-                continue
-
-            result_holder["current"] = relative_path
-
-            try:
-                gdown_download(
-                    url=f"https://drive.google.com/uc?id={file_obj.id}",
-                    output=str(local_path),
-                    quiet=True,
-                    use_cookies=False,
-                    resume=True,
-                    timeout=30,
-                    retries=3,
-                )
-
-                if local_path.exists() and local_path.stat().st_size > 0:
-                    completed += 1
-                    result_holder["completed"] = completed
-
-            except Exception as e:
-                result_holder.setdefault("errors", []).append(
-                    f"{relative_path}: {type(e).__name__}: {e}"
-                )
-
+        result_holder["result"] = downloaded
         result_holder["finished"] = True
-        result_holder["stage"] = "ダウンロード処理完了"
+
+    except TypeError as e:
+
+        # -------------------------------------------------------------------------
+        # gdownのバージョン差によるremaining_okエラー対策
+        # -------------------------------------------------------------------------
+
+        try:
+
+            import gdown
+
+            downloaded = gdown.download_folder(
+                id=GOOGLE_DRIVE_FOLDER_ID,
+                output=str(TEMP_DIR),
+                quiet=False,
+                use_cookies=False,
+            )
+
+            result_holder["result"] = downloaded
+            result_holder["finished"] = True
+
+        except Exception as e2:
+
+            result_holder["error"] = str(e2)
+            result_holder["finished"] = True
 
     except Exception as e:
 
-        result_holder["error"] = (
-            f"{type(e).__name__}: {e}"
-        )
+        result_holder["error"] = str(e)
         result_holder["finished"] = True
-
 
 
 def download_models_from_gdrive(force=False):
@@ -516,20 +451,18 @@ def download_models_from_gdrive(force=False):
     # ダウンロード開始
     # =========================================================================
 
-    # 表示上の総数はアプリが必要とする214ファイルをそのまま使用。
-    # フォルダ一覧取得中でも最初から「0/214」と表示する。
     result_holder = {
         "started": False,
         "finished": False,
         "result": None,
         "error": None,
-        "total": len(get_required_model_files()),
-        "completed": 0,
-        "current": "",
     }
 
     st.write("🔄 Google Driveフォルダ取得を開始します...")
 
+    # 画面上は元の仕様どおり、最初から「0/214ファイル」で表示する。
+    # ダウンロード中はTEMP_DIRを監視し、実際に保存されたファイル数だけを反映する。
+    total_models = total
     thread = threading.Thread(
         target=_run_gdrive_download,
         args=(result_holder,),
@@ -538,53 +471,42 @@ def download_models_from_gdrive(force=False):
 
     thread.start()
 
-    # =========================================================================
-    # タイムアウト監視
-    # =========================================================================
-
     timeout_seconds = 1800
-
     start_time = time.time()
-
     progress = st.progress(0)
-
     status = st.empty()
 
+    def _count_downloaded_models():
+        count = 0
+        try:
+            for relative_path in get_required_model_files():
+                path = TEMP_DIR / relative_path
+                if path.is_file() and path.stat().st_size > 0:
+                    count += 1
+        except Exception:
+            pass
+        return min(count, total_models)
+
     while thread.is_alive():
-
         elapsed = int(time.time() - start_time)
-        total_now = int(result_holder.get("total", 214) or 214)
-        completed_now = int(result_holder.get("completed", 0) or 0)
-
-        percent = min(
-            int(completed_now / total_now * 100),
-            99
-        )
-
-        progress.progress(percent)
-
-        # 従来の見た目を維持：常に「○/○ファイル」で表示。
-        status.info(
-            f"📥 Google Driveからモデルを取得中... "
-            f"{completed_now}/{total_now}ファイル"
-        )
+        downloaded_count = _count_downloaded_models()
+        percent = int(downloaded_count / total_models * 100) if total_models else 0
+        progress.progress(min(percent, 99))
+        status.info(f"📥 Google Driveからモデルを取得中... {downloaded_count}/{total_models} ファイル")
 
         if elapsed >= timeout_seconds:
-
-            status.error(
-                "❌ Google Driveからの取得が30分を超えたため停止しました。"
-            )
-
+            status.error("❌ Google Driveからの取得が30分を超えたため停止しました。")
             st.warning(
-                "取得済みファイルは一時保存先に残っています。\n\n"
-                "次回実行時は、すでに取得済みのファイルを再利用します。"
+                "Google Driveフォルダへのアクセスに時間がかかりすぎています。\n\n"
+                "取得済みファイルは一時保存先に残るため、次回起動時に再利用できます。\n\n"
+                "gdownは1回の通信を30秒でタイムアウトし、最大3回リトライします。"
             )
-
             return False
 
         time.sleep(1)
 
-    progress.progress(100)
+    downloaded_count = _count_downloaded_models()
+    progress.progress(100 if result_holder.get("error") is None else min(int(downloaded_count / total_models * 100), 99))
 
     # =========================================================================
     # エラー確認
