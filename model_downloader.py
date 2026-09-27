@@ -254,7 +254,6 @@ def download_model_zip() -> Path:
                 url=url,
                 output=str(ZIP_CACHE),
                 quiet=False,
-                fuzzy=True,
                 resume=False,
             )
 
