@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 import shutil
+import json
 
 # ==================================================================================
 # Suppress scikit-learn version warnings
@@ -170,7 +171,7 @@ print(json.dumps(items, ensure_ascii=False))
             return
         result_holder["files"] = json.loads(json_line)
     except Exception as e:
-        result_holder["error"] = str(e)
+        result_holder["error"] = f"{type(e).__name__}: {e}"
 
 
 def _download_file_with_gdown(file_id, destination, timeout_seconds=120):
