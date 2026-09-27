@@ -151,24 +151,63 @@ def _run_gdrive_download(result_holder):
         result_holder["finished"] = True
 
 
-def _download_one_file_subprocess(file_id, local_path, timeout_seconds=45):
-    """1ファイルのgdownを別プロセスで実行し、ハング時は強制終了する。"""
+def _download_one_file_subprocess(file_id, local_path, timeout_seconds=45, status_callback=None):
+    """1ファイルのgdownを別プロセスで実行し、1秒ごとに状態を返しながらハング時は強制終了する。"""
     code = r"""import sys
 import gdown
 file_id = sys.argv[1]
 output = sys.argv[2]
 gdown.download(id=file_id, output=output, quiet=True, use_cookies=False, resume=True, timeout=(10, 30), retries=1)
 """
+    process = None
+    start_time = time.time()
     try:
-        result = subprocess.run([sys.executable, "-c", code, str(file_id), str(local_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
-        if result.returncode != 0:
-            err = (result.stderr or result.stdout or "gdown failed").strip()
+        process = subprocess.Popen(
+            [sys.executable, "-c", code, str(file_id), str(local_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        while process.poll() is None:
+            elapsed = int(time.time() - start_time)
+            size = 0
+            if local_path.is_file():
+                try:
+                    size = local_path.stat().st_size
+                except Exception:
+                    size = 0
+
+            if status_callback:
+                status_callback(elapsed, size)
+
+            if elapsed >= timeout_seconds:
+                process.kill()
+                try:
+                    process.wait(timeout=3)
+                except Exception:
+                    pass
+                return False, f"タイムアウト（{timeout_seconds}秒）"
+
+            time.sleep(1)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            err = (stderr or stdout or "gdown failed").strip()
             return False, err[-1000:]
-        return local_path.is_file() and local_path.stat().st_size > 0, (result.stderr or "").strip()[-1000:]
-    except subprocess.TimeoutExpired:
-        return False, f"タイムアウト（{timeout_seconds}秒）"
+
+        if local_path.is_file() and local_path.stat().st_size > 0:
+            return True, (stderr or "").strip()[-1000:]
+        return False, "ダウンロード完了と判定されましたが、ファイルが存在しないかサイズが0です"
+
     except Exception as e:
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
         return False, str(e)
+
 
 
 def download_models_from_gdrive(force=False):
@@ -234,29 +273,74 @@ def download_models_from_gdrive(force=False):
     failed = []
 
     # 一覧取得後は1ファイルずつ別プロセスで処理する。
-    # 1ファイルがハングしても45秒で強制終了し、次のファイルへ進む。
-    for drive_file in drive_files:
+    # 処理中も1秒ごとに画面を更新し、「止まっている」のか「通信中」なのかを確認できるようにする。
+    for index, drive_file in enumerate(drive_files, start=1):
         local_path = Path(drive_file.local_path)
+        file_name = str(getattr(drive_file, "path", local_path))
+        file_start = time.time()
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)
+
             if local_path.is_file() and local_path.stat().st_size > 0:
                 completed += 1
-            else:
-                ok, error_message = _download_one_file_subprocess(
-                    drive_file.id, local_path, timeout_seconds=45
+                elapsed = int(time.time() - file_start)
+                status.info(
+                    f"✅ 完了 {completed}/{total_models} | {file_name} | 既存ファイルを使用"
                 )
+            else:
+                current_status = st.empty()
+                current_progress = st.progress(0)
+
+                def update_current(elapsed, size):
+                    mb = size / (1024 * 1024) if size else 0
+                    remaining = max(0, 45 - elapsed)
+                    current_status.info(
+                        f"⬇️ 処理中 {completed + 1}/{total_models}\n\n"
+                        f"📄 ファイル: `{file_name}`\n"
+                        f"⏱️ 経過: **{elapsed}秒** / 45秒\n"
+                        f"💾 現在のファイルサイズ: **{mb:.2f} MB**\n"
+                        f"⏳ タイムアウトまで: **{remaining}秒**\n"
+                        f"🔄 状態: Google Driveからダウンロード中..."
+                    )
+                    current_progress.progress(min(elapsed / 45, 0.99))
+
+                ok, error_message = _download_one_file_subprocess(
+                    drive_file.id, local_path, timeout_seconds=45, status_callback=update_current
+                )
+
+                elapsed = int(time.time() - file_start)
+                try:
+                    current_progress.empty()
+                    current_status.empty()
+                except Exception:
+                    pass
+
                 if ok:
                     completed += 1
+                    status.success(
+                        f"✅ 成功 {completed}/{total_models} | {file_name} | 所要 {elapsed}秒"
+                    )
                 else:
-                    name = str(getattr(drive_file, "path", local_path))
-                    failed.append(f"{name} : {error_message}" if error_message else name)
+                    failed.append(f"{file_name} : {error_message}" if error_message else file_name)
+                    status.warning(
+                        f"⚠️ スキップ {completed}/{total_models} | {file_name} | "
+                        f"所要 {elapsed}秒 | {error_message or '取得失敗'} → 次のファイルへ"
+                    )
         except Exception as e:
-            failed.append(f"{getattr(drive_file, 'path', local_path)} : {e}")
+            failed.append(f"{file_name} : {e}")
+            status.error(f"❌ エラー | {file_name} | {e} → 次のファイルへ")
 
+        # 全体進捗は「実際に存在するモデル数」で表示
         shown = min(completed, total_models)
         percent = int(shown / total_models * 100) if total_models else 0
         progress.progress(min(percent, 99))
-        status.info(f"📥 Google Driveからモデルを取得中... {shown}/{total_models} ファイル")
+
+        # 現在の位置と処理済み/失敗数を明示
+        status.info(
+            f"📥 Google Driveからモデルを取得中... **{shown}/{total_models} ファイル** | "
+            f"一覧上の処理位置: {index}/{len(drive_files)} | "
+            f"成功: {completed} | 失敗: {len(failed)}"
+        )
 
     st.write("📂 ダウンロードしたモデルを配置しています...")
     copied = 0
