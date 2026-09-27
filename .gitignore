@@ -42,10 +42,10 @@ Thumbs.db
 # data/
 
 # Model files - Streamlit Cloud deployment用にはローカルのみ使用
-*.pkl
-model_*.pkl
-scaler_*.pkl
-feature_cols_*.pkl
+#*.pkl
+#model_*.pkl
+#scaler_*.pkl
+#feature_cols_*.pkl
 models/
 Weather_Model/
 Combine_Model/
