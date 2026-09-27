@@ -130,67 +130,77 @@ def get_existing_model_count():
     return existing, len(files)
 
 
-def _run_gdrive_folder_download(result_holder, timeout_seconds=1800):
-    """Google Drive共有フォルダをgdown.download_folderで一括取得する。"""
+def _run_gdrive_folder_manifest(result_holder):
+    """Google Drive共有フォルダをURLで解析し、ファイル一覧(ID/パス)を取得する。"""
     code = r"""import sys
+import json
 import gdown
-folder_id = sys.argv[1]
-output = sys.argv[2]
+folder_url = sys.argv[1]
 result = gdown.download_folder(
-    id=folder_id,
-    output=output,
+    url=folder_url,
+    output=None,
     quiet=True,
     use_cookies=False,
-    resume=True,
+    skip_download=True,
     timeout=(15, 60),
-    retries=2,
+    retries=3,
 )
-print(f'__GDOWN_RESULT__:{len(result) if result else 0}')
+items = []
+for x in (result or []):
+    items.append({"id": str(x.id), "path": str(x.path)})
+print(json.dumps(items, ensure_ascii=False))
 """
-    process = None
-    start_time = time.time()
     try:
-        TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        process = subprocess.Popen(
-            [sys.executable, "-c", code, GOOGLE_DRIVE_FOLDER_ID, str(TEMP_DIR)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        process = subprocess.run(
+            [sys.executable, "-c", code, GOOGLE_DRIVE_FOLDER_URL],
+            capture_output=True,
             text=True,
+            timeout=180,
         )
-        while process.poll() is None:
-            elapsed = int(time.time() - start_time)
-            result_holder["elapsed"] = elapsed
-            if result_holder.get("status_callback"):
-                result_holder["status_callback"](elapsed)
-            if elapsed >= timeout_seconds:
-                process.kill()
-                process.wait(timeout=5)
-                result_holder["error"] = f"タイムアウト（{timeout_seconds}秒）"
-                result_holder["finished"] = True
-                return
-            time.sleep(1)
-        stdout, stderr = process.communicate()
-        result_holder["stdout"] = stdout or ""
-        result_holder["stderr"] = stderr or ""
+        result_holder["stdout"] = process.stdout or ""
+        result_holder["stderr"] = process.stderr or ""
         if process.returncode != 0:
-            result_holder["error"] = (stderr or stdout or "gdown download_folder failed").strip()[-3000:]
-        else:
-            result_holder["finished"] = True
+            result_holder["error"] = (process.stderr or process.stdout or "gdown folder manifest failed").strip()[-5000:]
+            return
+        # gdownのJSON以外の警告行を除去して最後のJSON配列を読む
+        lines = [x.strip() for x in (process.stdout or "").splitlines() if x.strip()]
+        json_line = next((x for x in reversed(lines) if x.startswith("[") and x.endswith("]")), None)
+        if json_line is None:
+            result_holder["error"] = "gdownは正常終了しましたが、フォルダ内ファイル一覧(JSON)を返しませんでした。"
+            return
+        result_holder["files"] = json.loads(json_line)
     except Exception as e:
-        if process is not None and process.poll() is None:
-            try:
-                process.kill()
-            except Exception:
-                pass
         result_holder["error"] = str(e)
-        result_holder["finished"] = True
+
+
+def _download_file_with_gdown(file_id, destination, timeout_seconds=120):
+    """manifestで得たDrive file IDを1ファイルずつ保存する。"""
+    code = r"""import sys
+import gdown
+file_id = sys.argv[1]
+output = sys.argv[2]
+gdown.download(id=file_id, output=output, quiet=True, use_cookies=False, resume=True, timeout=(15, 60), retries=3)
+"""
+    try:
+        p = subprocess.run(
+            [sys.executable, "-c", code, str(file_id), str(destination)],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        if p.returncode == 0 and Path(destination).is_file() and Path(destination).stat().st_size > 0:
+            return True, ""
+        return False, (p.stderr or p.stdout or "gdown download failed").strip()[-2000:]
+    except subprocess.TimeoutExpired:
+        return False, f"タイムアウト（{timeout_seconds}秒）"
+    except Exception as e:
+        return False, str(e)
 
 
 def download_models_from_gdrive(force=False):
-    """Google Drive共有フォルダを一括取得し、必要なモデルだけBASE_DIRへ配置する。"""
+    """Google Drive共有フォルダをマニフェスト取得→必要ファイルをダウンロードする。"""
     existing, total = get_existing_model_count()
     st.write(f"📦 モデルファイル確認: {existing}/{total}")
-
     missing = get_missing_model_files()
     if not missing and not force:
         st.success("✅ 必要なモデルファイルはすべて存在します。")
@@ -200,14 +210,11 @@ def download_models_from_gdrive(force=False):
     with st.expander("不足しているモデルファイル", expanded=False):
         for file in missing[:100]:
             st.write(f"- `{file}`")
-        if len(missing) > 100:
-            st.write(f"... その他 {len(missing) - 100} ファイル")
 
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    st.info("📥 Google Drive共有フォルダを一括取得します。\n\n個別ファイルごとの公開リンク解決をアプリ側で繰り返す方式は使用しません。")
-    st.code(f"Google Drive Folder ID:\n{GOOGLE_DRIVE_FOLDER_ID}")
+    st.info("📋 Google Drive共有フォルダのファイル一覧を取得します。")
+    st.code(f"Google Drive Folder URL:\n{GOOGLE_DRIVE_FOLDER_URL}")
     st.write(f"一時保存先: `{TEMP_DIR}`")
-
     try:
         import gdown
         st.write(f"gdown version: `{getattr(gdown, '__version__', 'unknown')}`")
@@ -215,88 +222,87 @@ def download_models_from_gdrive(force=False):
         st.error(f"❌ gdownを読み込めません: {e}")
         return False
 
-    status = st.empty()
-    progress = st.progress(0)
-    result_holder = {
-        "finished": False,
-        "error": None,
-        "elapsed": 0,
-        "status_callback": lambda elapsed: None,
-    }
+    manifest_holder = {"files": None, "error": None, "stdout": "", "stderr": ""}
+    with st.spinner("🔎 Google Driveフォルダを解析中..."):
+        _run_gdrive_folder_manifest(manifest_holder)
 
-    def update_status(elapsed):
-        status.info(
-            f"📥 Google Drive共有フォルダを一括取得中... **{elapsed}秒経過**\n\n"
-            f"📁 保存先: `{TEMP_DIR}`\n"
-            f"⏳ 最大待機時間: 30分\n"
-            f"🔄 gdown.download_folder() 実行中"
-        )
-        progress.progress(min(elapsed / 1800, 0.95))
-
-    result_holder["status_callback"] = update_status
-    thread = threading.Thread(target=_run_gdrive_folder_download, args=(result_holder, 1800), daemon=True)
-    thread.start()
-    thread.join()
-
-    if result_holder.get("error"):
-        status.error("❌ Google Drive共有フォルダの一括取得に失敗しました。")
-        st.code(result_holder["error"])
-        stderr = result_holder.get("stderr", "")
-        stdout = result_holder.get("stdout", "")
-        if stderr or stdout:
+    if manifest_holder.get("error"):
+        st.error("❌ Google Driveフォルダの一覧取得に失敗しました。")
+        st.code(manifest_holder["error"])
+        if manifest_holder.get("stderr"):
             with st.expander("gdown詳細ログ"):
-                if stdout:
-                    st.text("STDOUT:\n" + stdout[-5000:])
-                if stderr:
-                    st.text("STDERR:\n" + stderr[-5000:])
-        st.warning(
-            "今回のエラーは個別のpklファイル名ではなく、Google Drive側の共有フォルダ取得時点で発生しています。"
-        )
+                st.text(manifest_holder["stderr"][-5000:])
         return False
 
-    # gdownが保存したフォルダ構造を確認し、必要な214ファイルだけBASE_DIRへコピー。
-    downloaded_files = [p for p in TEMP_DIR.rglob("*") if p.is_file()]
-    status.info(f"📂 一括取得完了。保存されたファイルを確認中... {len(downloaded_files)}ファイル")
+    manifest = manifest_holder.get("files") or []
+    st.write(f"📋 Google Driveから取得したファイル一覧: **{len(manifest)}件**")
+    if not manifest:
+        st.error("❌ フォルダは認識できましたが、ファイル一覧が0件です。共有フォルダの公開範囲を確認してください。")
+        return False
 
+    # Drive側の相対パスを正規化し、必要ファイルと対応付ける。
     required = set(get_required_model_files())
-    copied = 0
-    matched = 0
-    for src_file in downloaded_files:
-        try:
-            relative = src_file.relative_to(TEMP_DIR)
-            rel_posix = relative.as_posix()
-            # gdownが共有フォルダ名を先頭に付けた場合に備えて、必要パスと照合。
-            candidate = rel_posix
-            parts = relative.parts
-            if candidate not in required and len(parts) > 1:
-                tail = Path(*parts[1:]).as_posix()
-                if tail in required:
-                    candidate = tail
-            if candidate not in required:
-                continue
-            matched += 1
-            dst = BASE_DIR / candidate
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if not dst.exists() or dst.stat().st_size != src_file.stat().st_size:
-                shutil.copy2(src_file, dst)
-            copied += 1
-        except Exception as e:
-            st.warning(f"⚠️ ファイル配置失敗: {src_file.name} / {e}")
+    by_path = {}
+    by_tail = {}
+    for item in manifest:
+        path = str(item.get("path", "")).replace("\\", "/").lstrip("/")
+        fid = item.get("id")
+        if not path or not fid:
+            continue
+        by_path[path] = fid
+        parts = path.split("/")
+        if len(parts) > 1:
+            tail = "/".join(parts[1:])
+            by_tail.setdefault(tail, []).append(fid)
 
-    st.write(f"📦 一括取得ファイル: {len(downloaded_files)} | 必要ファイルとの一致: {matched} | 配置: {copied}")
+    matches = {}
+    for req in required:
+        if req in by_path:
+            matches[req] = by_path[req]
+        elif len(by_tail.get(req, [])) == 1:
+            matches[req] = by_tail[req][0]
+
+    st.write(f"🔎 必要ファイルとの照合: **{len(matches)}/{total}件**")
+    unmatched = sorted(required - set(matches))
+    if unmatched:
+        with st.expander("Drive一覧に見つからないファイル", expanded=False):
+            for f in unmatched[:100]:
+                st.write(f"- `{f}`")
+        if len(matches) == 0:
+            st.error("❌ Driveフォルダは取得できましたが、アプリが要求するファイル名と1件も一致しませんでした。")
+            return False
+
+    progress = st.progress(0)
+    status = st.empty()
+    success = 0
+    failed = []
+    targets = [p for p in missing if p in matches]
+    for idx, req in enumerate(targets, 1):
+        dst = BASE_DIR / req
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        status.info(f"⬇️ モデル取得中 {idx}/{len(targets)}\n\n`{req}`")
+        ok, err = _download_file_with_gdown(matches[req], dst, timeout_seconds=120)
+        if ok:
+            success += 1
+        else:
+            failed.append(f"{req} : {err}")
+        progress.progress(min(idx / max(len(targets), 1), 1.0))
 
     missing_after = get_missing_model_files()
+    shown = total - len(missing_after)
+    st.write(f"📦 モデルファイル確認: **{shown}/{total}**")
     if not missing_after:
-        progress.progress(100)
-        status.success(f"✅ モデルファイルの準備完了: {total}/{total}")
+        st.success("✅ モデルファイルの準備が完了しました。")
         return True
 
-    shown = total - len(missing_after)
-    progress.progress(min(int(shown / total * 100), 99))
-    status.warning(f"⚠️ モデルファイル不足: {shown}/{total}")
-    with st.expander("取得できなかったファイル"):
-        for file in missing_after[:100]:
-            st.write(f"- `{file}`")
+    st.error(f"❌ まだ {len(missing_after)} 個のモデルファイルが不足しています。")
+    with st.expander("取得失敗・不足ファイル"):
+        for f in missing_after[:100]:
+            st.write(f"- `{f}`")
+    if failed:
+        with st.expander("今回のgdownエラー詳細"):
+            for f in failed[:100]:
+                st.code(f)
     return False
 
 
