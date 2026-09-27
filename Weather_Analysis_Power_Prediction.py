@@ -25,6 +25,8 @@ import hashlib
 from datetime import datetime as dt
 import warnings
 import os
+import sys
+import subprocess
 import threading
 import time
 import shutil
@@ -149,6 +151,26 @@ def _run_gdrive_download(result_holder):
         result_holder["finished"] = True
 
 
+def _download_one_file_subprocess(file_id, local_path, timeout_seconds=45):
+    """1ファイルのgdownを別プロセスで実行し、ハング時は強制終了する。"""
+    code = r"""import sys
+import gdown
+file_id = sys.argv[1]
+output = sys.argv[2]
+gdown.download(id=file_id, output=output, quiet=True, use_cookies=False, resume=True, timeout=(10, 30), retries=1)
+"""
+    try:
+        result = subprocess.run([sys.executable, "-c", code, str(file_id), str(local_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout_seconds)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "gdown failed").strip()
+            return False, err[-1000:]
+        return local_path.is_file() and local_path.stat().st_size > 0, (result.stderr or "").strip()[-1000:]
+    except subprocess.TimeoutExpired:
+        return False, f"タイムアウト（{timeout_seconds}秒）"
+    except Exception as e:
+        return False, str(e)
+
+
 def download_models_from_gdrive(force=False):
     """Google Driveから不足モデルを1ファイルずつ取得する。"""
     existing, total = get_existing_model_count()
@@ -211,8 +233,8 @@ def download_models_from_gdrive(force=False):
     completed = 0
     failed = []
 
-    # 一覧取得後は1ファイルずつ処理する。
-    # 1ファイルが失敗しても次へ進むため、94/214などで全体が止まらない。
+    # 一覧取得後は1ファイルずつ別プロセスで処理する。
+    # 1ファイルがハングしても45秒で強制終了し、次のファイルへ進む。
     for drive_file in drive_files:
         local_path = Path(drive_file.local_path)
         try:
@@ -220,19 +242,14 @@ def download_models_from_gdrive(force=False):
             if local_path.is_file() and local_path.stat().st_size > 0:
                 completed += 1
             else:
-                gdown.download(
-                    id=drive_file.id,
-                    output=str(local_path),
-                    quiet=True,
-                    use_cookies=False,
-                    resume=True,
-                    timeout=(10, 30),
-                    retries=2,
+                ok, error_message = _download_one_file_subprocess(
+                    drive_file.id, local_path, timeout_seconds=45
                 )
-                if local_path.is_file() and local_path.stat().st_size > 0:
+                if ok:
                     completed += 1
                 else:
-                    failed.append(str(getattr(drive_file, "path", local_path)))
+                    name = str(getattr(drive_file, "path", local_path))
+                    failed.append(f"{name} : {error_message}" if error_message else name)
         except Exception as e:
             failed.append(f"{getattr(drive_file, 'path', local_path)} : {e}")
 
