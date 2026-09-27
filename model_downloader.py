@@ -1,69 +1,32 @@
-# model_downloader.py
 # -*- coding: utf-8 -*-
-
 """
 Streamlit Cloud 用モデルダウンローダー
 
-Google Drive:
-    weather-models/
-    ├── models/
-    ├── Weather_Model/
-    └── Combine_Model/
+Google Drive 上の「モデル一式ZIP」を1ファイルだけ gdown で取得し、
+models / Weather_Model / Combine_Model とルート直下へ展開する。
 
-を対象に、
-
-- 1ファイルずつダウンロード
-- 最大3回リトライ
-- Streamlit進捗表示
-- 途中まで成功したファイルは再利用
-- gdown.download_folder() は使用しない
+設計方針:
 - Google Drive API / google.oauth2 は使用しない
-- 日本語ファイル名対応
-- ダウンロード後に正しいフォルダへ配置
+- gdown.download_folder() は使用しない
+- Google Drive のHTML解析もしない
+- 1個のZIPファイルだけをダウンロードする
+- 最大3回リトライ
+- 途中まで配置済みのモデルは再利用
+- ZIP内の日本語ファイル名に対応
+- ZIP Slip（パストラバーサル）を防止
+- 必要ファイルを明示的に検証する
 """
 
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import time
+import zipfile
 from pathlib import Path
-from typing import Optional
-from urllib.parse import quote
+from typing import Iterable
 
 import gdown
-
-
-# ============================================================
-# 基本設定
-# ============================================================
-
-BASE_DIR = Path(__file__).resolve().parent
-
-TEMP_DIR = BASE_DIR / ".gdrive_temp"
-
-MODEL_DIRS = [
-    "models",
-    "Weather_Model",
-    "Combine_Model",
-]
-
-# Google Drive フォルダID
-GDRIVE_FOLDER_ID = "11CrLEAr_ljmYx1Ib5TPpWG_kvwDElNgS"
-
-MAX_RETRIES = 3
-
-# リトライ間隔
-RETRY_WAIT_SECONDS = 3
-
-# 大きなファイルを扱うための最小サイズ判定
-MIN_VALID_FILE_SIZE = 1
-
-
-# ============================================================
-# Streamlit は必須にしない
-# ============================================================
 
 try:
     import streamlit as st
@@ -72,11 +35,35 @@ except ImportError:
 
 
 # ============================================================
+# 基本設定
+# ============================================================
+BASE_DIR = Path(__file__).resolve().parent
+TEMP_DIR = BASE_DIR / ".gdrive_temp"
+ZIP_CACHE = TEMP_DIR / "weather-models.zip"
+EXTRACT_DIR = TEMP_DIR / "extracted"
+
+MODEL_DIRS = [
+    "models",
+    "Weather_Model",
+    "Combine_Model",
+]
+
+# Google Drive にアップロードした「モデル一式ZIP」のファイルID。
+# 環境変数 GDRIVE_MODEL_ZIP_ID を優先する。
+GDRIVE_ZIP_FILE_ID = os.getenv(
+    "GDRIVE_MODEL_ZIP_ID",
+    "ここにGoogle DriveのZIPファイルIDを設定",
+).strip()
+
+MAX_RETRIES = 3
+RETRY_WAIT_SECONDS = 5
+MIN_VALID_FILE_SIZE = 1
+
+
+# ============================================================
 # 表示ヘルパー
 # ============================================================
-
 def _write(message: str) -> None:
-    """Streamlit があれば画面へ、なければ print。"""
     if st is not None:
         st.write(message)
     else:
@@ -112,1009 +99,347 @@ def _success(message: str) -> None:
 
 
 # ============================================================
-# パス関連
+# 必要ファイル一覧
 # ============================================================
-
-def get_model_root() -> Path:
-    """
-    モデルのルートディレクトリ。
-
-    weather-models/
-    ├── models/
-    ├── Weather_Model/
-    └── Combine_Model/
-    """
-    return BASE_DIR
+def _required_root_files() -> list[str]:
+    return [
+        "model_toden_power_weather.pkl",
+        "scaler_toden_power_weather.pkl",
+        "feature_cols_toden.pkl",
+        "model_tohoku_power_weather.pkl",
+        "scaler_tohoku_power_weather.pkl",
+        "feature_cols_tohoku.pkl",
+    ]
 
 
-def get_model_dir(name: str) -> Path:
-    return BASE_DIR / name
+def _required_models_files() -> list[str]:
+    files: list[str] = []
+    for location in ("kumagaya", "sendai"):
+        for element in ("原子力", "風力発電実績", "水力"):
+            files.append(f"models/model_{location}_{element}.pkl")
+        files.append(f"models/scaler_{location}.pkl")
+    return files
 
 
-# ============================================================
-# フォルダ存在確認
-# ============================================================
-
-def check_model_directories() -> bool:
-    """
-    3フォルダが存在し、1ファイル以上入っているか確認。
-    """
-
-    all_ok = True
-
-    _write("=== Setup Models ===")
-
-    for directory_name in MODEL_DIRS:
-        directory = BASE_DIR / directory_name
-
-        exists = directory.exists() and directory.is_dir()
-
-        file_count = 0
-
-        if exists:
-            try:
-                file_count = sum(
-                    1
-                    for p in directory.rglob("*")
-                    if p.is_file()
-                )
-            except Exception:
-                file_count = 0
-
-        _write(
-            f"{directory_name}: "
-            f"{exists and file_count > 0}"
-        )
-
-        if not exists or file_count == 0:
-            all_ok = False
-
-    return all_ok
+def _required_weather_files() -> list[str]:
+    files: list[str] = []
+    for location in ("kumagaya", "sendai"):
+        for element in ("気温", "相対湿度", "降水量", "風速", "日射量", "天気"):
+            files.append(f"Weather_Model/model_{location}_{element}.pkl")
+        files.append(f"Weather_Model/scaler_{location}.pkl")
+    return files
 
 
-# ============================================================
-# 一時ディレクトリ
-# ============================================================
+def _required_combine_files() -> list[str]:
+    combinations = [
+        ("原子力", "01"),
+        ("火力", "02"),
+        ("水力", "03"),
+        ("太陽光発電実績", "04"),
+        ("風力発電実績", "05"),
+        ("原子力_火力", "06"),
+        ("原子力_水力", "07"),
+        ("原子力_太陽光発電実績", "08"),
+        ("原子力_風力発電実績", "09"),
+        ("火力_水力", "10"),
+        ("火力_太陽光発電実績", "11"),
+        ("火力_風力発電実績", "12"),
+        ("水力_太陽光発電実績", "13"),
+        ("水力_風力発電実績", "14"),
+        ("太陽光発電実績_風力発電実績", "15"),
+        ("原子力_火力_水力", "16"),
+        ("原子力_火力_太陽光発電実績", "17"),
+        ("原子力_火力_風力発電実績", "18"),
+        ("原子力_水力_太陽光発電実績", "19"),
+        ("原子力_水力_風力発電実績", "20"),
+        ("原子力_太陽光発電実績_風力発電実績", "21"),
+        ("火力_水力_太陽光発電実績", "22"),
+        ("火力_水力_風力発電実績", "23"),
+        ("火力_太陽光発電実績_風力発電実績", "24"),
+        ("水力_太陽光発電実績_風力発電実績", "25"),
+        ("原子力_火力_水力_太陽光発電実績", "26"),
+        ("原子力_火力_水力_風力発電実績", "27"),
+        ("原子力_火力_太陽光発電実績_風力発電実績", "28"),
+        ("原子力_水力_太陽光発電実績_風力発電実績", "29"),
+        ("火力_水力_太陽光発電実績_風力発電実績", "30"),
+        ("原子力_火力_水力_太陽光発電実績_風力発電実績", "31"),
+    ]
 
-def prepare_temp_directory() -> Path:
-    """
-    一時ディレクトリを準備する。
-
-    既存ファイルを完全削除すると、
-    途中まで成功していたダウンロードまで消えるため、
-    基本的には既存ファイルを再利用する。
-    """
-
-    TEMP_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    _write("Temp directory ready")
-
-    return TEMP_DIR
+    files: list[str] = []
+    for location in ("toden", "tohoku"):
+        for combination_name, number in combinations:
+            files.append(
+                f"Combine_Model/model_{location}_{number}_{combination_name}.pkl"
+            )
+            files.append(
+                f"Combine_Model/scaler_{location}_{number}_{combination_name}.pkl"
+            )
+            files.append(
+                f"Combine_Model/info_{location}_{number}_{combination_name}.json"
+            )
+    return files
 
 
-# ============================================================
-# Google Drive URL
-# ============================================================
-
-def get_folder_url() -> str:
+def get_required_model_files() -> list[str]:
+    """アプリが必要とする全モデルファイルを返す。"""
     return (
-        f"https://drive.google.com/drive/folders/"
-        f"{GDRIVE_FOLDER_ID}"
+        _required_root_files()
+        + _required_models_files()
+        + _required_weather_files()
+        + _required_combine_files()
     )
 
 
 # ============================================================
-# Google Drive ページからファイル情報を取得
+# ファイル確認
 # ============================================================
+def _is_valid_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size >= MIN_VALID_FILE_SIZE
+    except OSError:
+        return False
 
-def get_drive_file_list() -> list[dict]:
-    """
-    公開Google DriveフォルダのHTMLから、
 
-        id
-        name
-        relative path
+def get_missing_model_files() -> list[str]:
+    missing: list[str] = []
+    for relative in get_required_model_files():
+        if not _is_valid_file(BASE_DIR / relative):
+            missing.append(relative)
+    return missing
 
-    を可能な範囲で取得する。
 
-    Google Drive API は使用しない。
-    """
+def get_existing_model_count() -> int:
+    required = get_required_model_files()
+    return sum(1 for relative in required if _is_valid_file(BASE_DIR / relative))
 
-    import requests
 
-    folder_url = get_folder_url()
+def check_models_complete() -> bool:
+    return len(get_missing_model_files()) == 0
 
-    _write("Google Driveフォルダへの接続を確認しています...")
-    _write(folder_url)
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/131.0 Safari/537.36"
-        )
-    }
-
-    response = requests.get(
-        folder_url,
-        headers=headers,
-        timeout=60,
-    )
-
-    response.raise_for_status()
-
-    html = response.text
-
-    if not html:
+# ============================================================
+# ZIPダウンロード
+# ============================================================
+def _get_zip_file_id() -> str:
+    value = os.getenv("GDRIVE_MODEL_ZIP_ID", GDRIVE_ZIP_FILE_ID).strip()
+    if not value or value == "ここにGoogle DriveのZIPファイルIDを設定":
         raise RuntimeError(
-            "Google Driveからページを取得できませんでした。"
+            "Google DriveのモデルZIPファイルIDが設定されていません。"
+            "GDRIVE_MODEL_ZIP_ID を Streamlit Secrets / 環境変数に設定してください。"
         )
+    return value
 
-    _success("Google Driveフォルダへの接続成功")
 
-    # --------------------------------------------------------
-    # Google Drive のHTML / JSONには、
-    # ファイルIDが大量に登場する。
-    # まずID候補を取得する。
-    # --------------------------------------------------------
+def download_model_zip() -> Path:
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    file_id = _get_zip_file_id()
 
-    id_pattern = re.compile(
-        r'"([a-zA-Z0-9_-]{20,})"'
-    )
+    if _is_valid_file(ZIP_CACHE):
+        _write(f"既存のZIPを再利用します: {ZIP_CACHE}")
+        return ZIP_CACHE
 
-    ids = list(dict.fromkeys(
-        id_pattern.findall(html)
-    ))
-
-    _write(
-        f"検出されたID候補: {len(ids)}"
-    )
-
-    # --------------------------------------------------------
-    # HTML中のファイル名候補
-    # --------------------------------------------------------
-
-    file_extensions = (
-        ".pkl",
-        ".pickle",
-        ".json",
-        ".csv",
-        ".joblib",
-        ".npz",
-        ".npy",
-        ".pt",
-        ".pth",
-        ".bin",
-    )
-
-    # Unicode文字を含むファイル名にも対応
-    filename_pattern = re.compile(
-        r'([^"<>\\/:*?]+'
-        r'(?:'
-        + "|".join(
-            re.escape(ext)
-            for ext in file_extensions
-        )
-        + r'))',
-        re.IGNORECASE,
-    )
-
-    filenames = list(dict.fromkeys(
-        filename_pattern.findall(html)
-    ))
-
-    # --------------------------------------------------------
-    # Google DriveのHTMLに現れるファイル情報を
-    # 周辺文字列からできるだけ対応させる。
-    # --------------------------------------------------------
-
-    results: list[dict] = []
-
-    for filename in filenames:
-
-        filename = filename.strip()
-
-        if not filename:
-            continue
-
-        if len(filename) > 300:
-            continue
-
-        # ファイル名が含まれる周辺HTMLを探す
-        pos = html.find(filename)
-
-        if pos < 0:
-            continue
-
-        start = max(0, pos - 3000)
-        end = min(
-            len(html),
-            pos + len(filename) + 3000,
-        )
-
-        area = html[start:end]
-
-        nearby_ids = id_pattern.findall(area)
-
-        for file_id in nearby_ids:
-
-            if file_id == GDRIVE_FOLDER_ID:
-                continue
-
-            results.append(
-                {
-                    "id": file_id,
-                    "name": filename,
-                }
-            )
-
-            break
-
-    # 重複削除
-    unique = {}
-
-    for item in results:
-
-        key = (
-            item["id"],
-            item["name"],
-        )
-
-        unique[key] = item
-
-    results = list(unique.values())
-
-    # --------------------------------------------------------
-    # Google Drive上の既知のフォルダ構造から
-    # 3フォルダに振り分ける。
-    # --------------------------------------------------------
-
-    categorized = []
-
-    for item in results:
-
-        name = item["name"]
-
-        if name.startswith("model_") or name.startswith("scaler_"):
-
-            # Combine_Model にあるもの
-            if (
-                "toden" in name
-                or "tohoku" in name
-                or name.startswith("summary_")
-                or name.startswith("info_")
-            ):
-                category = "Combine_Model"
-
-            # models にあるもの
-            elif (
-                "kumagaya" in name
-                or "sendai" in name
-            ):
-                category = "models"
-
-            else:
-                category = None
-
-        elif name.startswith("info_"):
-            category = "Combine_Model"
-
-        elif name.startswith("results_"):
-            category = "Weather_Model"
-
-        else:
-            category = None
-
-        # Weather_Modelのファイル
-        if (
-            name.startswith("model_kumagaya_")
-            or name.startswith("model_sendai_")
-        ):
-
-            weather_keywords = (
-                "天気",
-                "日射量",
-                "気温",
-                "相対湿度",
-                "降水量",
-                "風速",
-            )
-
-            if any(
-                keyword in name
-                for keyword in weather_keywords
-            ):
-                category = "Weather_Model"
-
-        if category:
-            item["category"] = category
-            categorized.append(item)
-
-    # --------------------------------------------------------
-    # 同じ名前で複数IDがある場合は重複排除
-    # --------------------------------------------------------
-
-    unique_by_path = {}
-
-    for item in categorized:
-
-        key = (
-            item["category"],
-            item["name"],
-        )
-
-        unique_by_path[key] = item
-
-    categorized = list(
-        unique_by_path.values()
-    )
-
-    # --------------------------------------------------------
-    # フォルダ名自体の検出
-    # --------------------------------------------------------
-
-    folder_names = []
-
-    for folder_name in MODEL_DIRS:
-
-        if folder_name in html:
-            folder_names.append(folder_name)
-
-    if folder_names:
-
-        _write("Google Driveフォルダ構成：")
-
-        for folder_name in MODEL_DIRS:
-
-            if folder_name in folder_names:
-                _write(f"📁 {folder_name}")
-
-    return categorized
-
-
-# ============================================================
-# gdownで1ファイルダウンロード
-# ============================================================
-
-def download_single_file(
-    file_id: str,
-    destination: Path,
-) -> bool:
-    """
-    Google Driveの1ファイルをダウンロード。
-
-    最大3回。
-    """
-
-    destination.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    # 既に存在する場合は再利用
-    if (
-        destination.exists()
-        and destination.is_file()
-        and destination.stat().st_size >= MIN_VALID_FILE_SIZE
-    ):
-        return True
-
-    url = (
-        f"https://drive.google.com/uc?id="
-        f"{quote(file_id)}"
-    )
+    url = f"https://drive.google.com/uc?id={file_id}"
 
     for attempt in range(1, MAX_RETRIES + 1):
-
         try:
+            _write(f"📦 モデルZIP取得 {attempt}/{MAX_RETRIES}")
 
-            _write(
-                f"  ダウンロード試行 "
-                f"{attempt}/{MAX_RETRIES}"
-            )
-
-            # 壊れた途中ファイルがあれば削除
-            if destination.exists():
+            if ZIP_CACHE.exists():
                 try:
-                    destination.unlink()
-                except Exception:
+                    ZIP_CACHE.unlink()
+                except OSError:
                     pass
 
             result = gdown.download(
                 url=url,
-                output=str(destination),
+                output=str(ZIP_CACHE),
                 quiet=False,
                 fuzzy=True,
+                resume=False,
             )
 
-            if result is None:
-                raise RuntimeError(
-                    "gdown.download() が None を返しました"
-                )
+            if result is None or not _is_valid_file(ZIP_CACHE):
+                raise RuntimeError("モデルZIPを取得できませんでした")
 
-            if (
-                not destination.exists()
-                or destination.stat().st_size < MIN_VALID_FILE_SIZE
-            ):
-                raise RuntimeError(
-                    "ダウンロード後のファイルが存在しないか空です"
-                )
+            _success(
+                f"✅ モデルZIP取得成功 "
+                f"({ZIP_CACHE.stat().st_size / 1024 / 1024:.1f} MB)"
+            )
+            return ZIP_CACHE
 
-            return True
-
-        except Exception as e:
-
+        except Exception as exc:
             _warning(
-                f"  ⚠️ ダウンロード失敗 "
-                f"({attempt}/{MAX_RETRIES}): {e}"
+                f"⚠️ ZIP取得失敗 ({attempt}/{MAX_RETRIES}): "
+                f"{type(exc).__name__}: {exc}"
             )
-
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_WAIT_SECONDS)
 
-    return False
+    raise RuntimeError("モデルZIPの取得に失敗しました")
 
 
 # ============================================================
-# ダウンロード処理
+# ZIP安全展開
 # ============================================================
+def _safe_zip_members(zf: zipfile.ZipFile) -> Iterable[tuple[zipfile.ZipInfo, Path]]:
+    root = EXTRACT_DIR.resolve()
 
-def download_files(
-    file_list: list[dict],
-) -> tuple[int, int]:
-    """
-    1ファイルずつダウンロード。
+    for info in zf.infolist():
+        # ZIPのディレクトリは作成だけ許可
+        member = Path(info.filename)
 
-    Returns:
-        (成功数, 失敗数)
-    """
+        if member.is_absolute():
+            raise RuntimeError(f"安全でないZIPパスです: {info.filename}")
 
-    if not file_list:
-        _warning(
-            "Google Driveからダウンロード対象のファイルを"
-            "検出できませんでした。"
-        )
-        return 0, 0
+        target = (EXTRACT_DIR / member).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise RuntimeError(f"安全でないZIPパスです: {info.filename}")
 
-    total = len(file_list)
-
-    _write("=== Download Start ===")
-    _write(
-        f"ダウンロード対象ファイル数: {total}"
-    )
-
-    progress = None
-
-    if st is not None:
-        progress = st.progress(0)
-
-    success_count = 0
-    failed_count = 0
-
-    for index, item in enumerate(file_list, start=1):
-
-        category = item["category"]
-        filename = item["name"]
-        file_id = item["id"]
-
-        relative_path = (
-            Path(category)
-            / filename
-        )
-
-        destination = (
-            TEMP_DIR
-            / relative_path
-        )
-
-        _write(
-            f"📥 {index}/{total} "
-            f"{relative_path.as_posix()}"
-        )
-
-        ok = download_single_file(
-            file_id=file_id,
-            destination=destination,
-        )
-
-        if ok:
-            success_count += 1
-
-            _success(
-                f"✅ {relative_path.as_posix()}"
-            )
-
-        else:
-            failed_count += 1
-
-            _error(
-                f"❌ {relative_path.as_posix()}"
-            )
-
-        if progress is not None:
-            progress.progress(
-                index / total
-            )
-
-    _write(
-        f"=== Download Result ===\n"
-        f"成功: {success_count}\n"
-        f"失敗: {failed_count}\n"
-        f"合計: {total}"
-    )
-
-    return success_count, failed_count
+        yield info, target
 
 
-# ============================================================
-# 既存ファイル一覧
-# ============================================================
+def extract_model_zip(zip_path: Path) -> Path:
+    if EXTRACT_DIR.exists():
+        shutil.rmtree(EXTRACT_DIR)
+    EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
 
-def count_files(directory: Path) -> int:
-    if not directory.exists():
-        return 0
+    _write("📂 モデルZIPを展開しています...")
 
-    try:
-        return sum(
-            1
-            for p in directory.rglob("*")
-            if p.is_file()
-        )
-    except Exception:
-        return 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        bad = zf.testzip()
+        if bad is not None:
+            raise RuntimeError(f"ZIPが破損しています: {bad}")
 
-
-def list_downloaded_files() -> None:
-
-    _write("=== Folder Check ===")
-
-    for directory_name in MODEL_DIRS:
-
-        directory = TEMP_DIR / directory_name
-
-        count = count_files(directory)
-
-        _write(
-            f"📁 {directory_name}: "
-            f"{count} items"
-        )
-
-
-# ============================================================
-# インストール
-# ============================================================
-
-def install_models() -> bool:
-    """
-    .gdrive_temp 以下の3フォルダを
-    BASE_DIR直下へコピーする。
-
-    コピー先:
-        models/
-        Weather_Model/
-        Combine_Model/
-    """
-
-    _write("=== Model Installation ===")
-
-    all_ok = True
-
-    for directory_name in MODEL_DIRS:
-
-        src = TEMP_DIR / directory_name
-        dst = BASE_DIR / directory_name
-
-        _write(
-            f"処理中: {directory_name}"
-        )
-
-        _write(f"src = {src}")
-        _write(f"dst = {dst}")
-
-        if not src.exists():
-
-            _warning(
-                f"{directory_name} のダウンロード先がありません"
-            )
-
-            all_ok = False
-            continue
-
-        source_count = count_files(src)
-
-        if source_count == 0:
-
-            _warning(
-                f"{directory_name} にファイルがありません"
-            )
-
-            all_ok = False
-            continue
-
-        dst.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        copied = 0
-
-        for source_file in src.rglob("*"):
-
-            if not source_file.is_file():
+        members = list(_safe_zip_members(zf))
+        for info, target in members:
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
                 continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info, "r") as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
 
-            relative = source_file.relative_to(src)
-
-            destination_file = (
-                dst / relative
-            )
-
-            destination_file.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            try:
-
-                shutil.copy2(
-                    source_file,
-                    destination_file,
-                )
-
-                copied += 1
-
-            except Exception as e:
-
-                _warning(
-                    f"コピー失敗: "
-                    f"{source_file}: {e}"
-                )
-
-        destination_count = count_files(dst)
-
-        if destination_count > 0:
-
-            _success(
-                f"✅ {directory_name} を配置しました "
-                f"({destination_count} files)"
-            )
-
-        else:
-
-            _error(
-                f"❌ {directory_name} の配置に失敗しました"
-            )
-
-            all_ok = False
-
-    return all_ok
+    _success("✅ ZIP展開完了")
+    return EXTRACT_DIR
 
 
 # ============================================================
-# 必要モデル検索
+# ZIP構造の吸収
 # ============================================================
+def _find_extracted_file(root: Path, relative: str) -> Path | None:
+    direct = root / relative
+    if _is_valid_file(direct):
+        return direct
 
-def find_model_file(
-    filename: str,
-) -> Optional[Path]:
-    """
-    モデルファイルを以下から検索。
-
-    1. BASE_DIR
-    2. models
-    3. Weather_Model
-    4. Combine_Model
-    """
-
-    candidates = [
-        BASE_DIR / filename,
-        BASE_DIR / "models" / filename,
-        BASE_DIR / "Weather_Model" / filename,
-        BASE_DIR / "Combine_Model" / filename,
-    ]
-
-    for path in candidates:
-
-        if path.exists() and path.is_file():
-            return path
-
-    # 最終手段として再帰検索
-    for directory_name in MODEL_DIRS:
-
-        directory = (
-            BASE_DIR / directory_name
-        )
-
-        if not directory.exists():
+    # ZIPが weather-models/ 配下になっている場合にも対応
+    candidates = list(root.rglob(Path(relative).name))
+    for candidate in candidates:
+        try:
+            candidate.relative_to(root)
+        except ValueError:
             continue
-
-        matches = list(
-            directory.rglob(filename)
-        )
-
-        if matches:
-            return matches[0]
-
+        if _is_valid_file(candidate):
+            rel_parts = candidate.relative_to(root).parts
+            target_parts = Path(relative).parts
+            if len(rel_parts) >= len(target_parts) and tuple(rel_parts[-len(target_parts):]) == tuple(target_parts):
+                return candidate
     return None
 
 
-# ============================================================
-# モデル構成確認
-# ============================================================
+def install_missing_models(extracted_root: Path) -> tuple[int, list[str]]:
+    required = get_required_model_files()
+    installed = 0
+    missing: list[str] = []
 
-def print_model_tree() -> None:
+    _write("=== Model Installation ===")
 
-    _write("=== Installed Model Files ===")
+    for relative in required:
+        destination = BASE_DIR / relative
 
-    for directory_name in MODEL_DIRS:
-
-        directory = (
-            BASE_DIR / directory_name
-        )
-
-        if not directory.exists():
-
-            _write(
-                f"❌ {directory_name}: not found"
-            )
-
+        # 既に存在する正常ファイルは再利用
+        if _is_valid_file(destination):
             continue
 
-        files = [
-            p
-            for p in directory.rglob("*")
-            if p.is_file()
-        ]
+        source = _find_extracted_file(extracted_root, relative)
+        if source is None:
+            missing.append(relative)
+            continue
 
-        _write(
-            f"📁 {directory_name}: "
-            f"{len(files)} files"
-        )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        installed += 1
+
+    return installed, missing
 
 
 # ============================================================
-# メインダウンロード関数
+# メイン
 # ============================================================
-
-def download_models_from_gdrive(
-    force: bool = False,
-) -> bool:
+def download_models_from_gdrive(force: bool = False) -> bool:
     """
-    Streamlit Cloud起動時に呼び出すメイン関数。
+    必要モデルを揃える。
 
-    成功:
-        True
-
-    失敗:
-        False
+    完全に揃っていればGoogle Driveへアクセスしない。
+    一部だけ不足している場合は、モデルZIPを取得して不足分だけ配置する。
     """
-
-    # --------------------------------------------------------
-    # 既にモデルが存在するなら何もしない
-    # --------------------------------------------------------
-
-    if not force:
-
-        if check_model_directories():
-
-            _success(
-                "✅ 必要なモデルは既に存在します。"
-            )
-
-            return True
-
-    _write("⚠️ モデルが存在しません")
-
-    _write(
-        "Running download_models_from_gdrive()."
-    )
-
-    _info(
-        "📥 Google Drive からモデルをダウンロード中..."
-    )
-
-    _write(
-        "初回のみ時間がかかる場合があります。"
-    )
-
-    # --------------------------------------------------------
-    # 環境情報
-    # --------------------------------------------------------
-
-    _write("=== Environment Info ===")
-
-    _write(
-        f"gdown version: "
-        f"{getattr(gdown, '__version__', 'unknown')}"
-    )
-
-    _write(
-        f"BASE_DIR: {BASE_DIR}"
-    )
-
-    _write(
-        f"TEMP_DIR: {TEMP_DIR}"
-    )
-
-    _write(
-        f"Folder ID: {GDRIVE_FOLDER_ID}"
-    )
-
-    # --------------------------------------------------------
-    # TEMP
-    # --------------------------------------------------------
-
-    prepare_temp_directory()
-
-    # --------------------------------------------------------
-    # Driveファイル一覧取得
-    # --------------------------------------------------------
-
-    _write("=== Google Drive File List ===")
-
-    try:
-
-        _write(
-            "Google Driveフォルダを確認しています..."
-        )
-
-        file_list = get_drive_file_list()
-
-    except Exception as e:
-
-        _error(
-            "Google Driveフォルダ取得中に"
-            "エラーが発生しました"
-        )
-
-        _error(
-            f"エラー: {type(e).__name__}: {e}"
-        )
-
-        return False
-
-    if not file_list:
-
-        _error(
-            "Google Driveからファイル情報を"
-            "取得できませんでした。"
-        )
-
-        _warning(
-            "Google Driveフォルダが"
-            "「リンクを知っている全員」に"
-            "閲覧可能になっているか確認してください。"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # ファイル分類表示
-    # --------------------------------------------------------
-
-    counts = {
-        name: 0
-        for name in MODEL_DIRS
-    }
-
-    for item in file_list:
-
-        category = item.get("category")
-
-        if category in counts:
-            counts[category] += 1
-
-    _write(
-        f"ダウンロード対象: {len(file_list)}"
-    )
-
-    for name in MODEL_DIRS:
-
-        _write(
-            f"  {name}: {counts[name]} files"
-        )
-
-    # --------------------------------------------------------
-    # ダウンロード
-    # --------------------------------------------------------
-
-    success_count, failed_count = (
-        download_files(file_list)
-    )
-
-    # --------------------------------------------------------
-    # ダウンロード後確認
-    # --------------------------------------------------------
-
-    list_downloaded_files()
-
-    _write("=== Download Complete Check ===")
-
-    _write(
-        f"取得ファイル数: {success_count}"
-    )
-
-    if failed_count > 0:
-
-        _warning(
-            f"⚠️ {failed_count} ファイルの取得に失敗しました。"
-        )
-
-        _warning(
-            "失敗したファイルは次回起動時に再試行されます。"
-        )
-
-    # --------------------------------------------------------
-    # インストール
-    # --------------------------------------------------------
-
-    if success_count > 0:
-
-        installed = install_models()
-
-    else:
-
-        installed = False
-
-    # --------------------------------------------------------
-    # 最終確認
-    # --------------------------------------------------------
-
-    _write("=== Final Check ===")
-
-    final_ok = True
-
-    for directory_name in MODEL_DIRS:
-
-        directory = (
-            BASE_DIR / directory_name
-        )
-
-        exists = (
-            directory.exists()
-            and count_files(directory) > 0
-        )
-
-        _write(
-            f"{directory_name}: {exists}"
-        )
-
-        if not exists:
-            final_ok = False
-
-    print_model_tree()
-
-    if final_ok:
-
-        _success(
-            "🎉 すべてのモデルのダウンロードと"
-            "配置が完了しました！"
-        )
-
+    existing = get_existing_model_count()
+    total = len(get_required_model_files())
+
+    _write(f"=== Model Check ===")
+    _write(f"必要ファイル: {total}")
+    _write(f"存在ファイル: {existing}")
+
+    if not force and existing == total:
+        _success("✅ 必要なモデルはすべて揃っています。")
         return True
 
-    _error(
-        "❌ モデルの一部または全部を"
-        "配置できませんでした。"
-    )
+    missing = get_missing_model_files()
+    _warning(f"不足ファイル: {len(missing)}")
 
-    return False
+    if missing and len(missing) <= 10:
+        for name in missing:
+            _write(f"  - {name}")
 
+    try:
+        zip_path = download_model_zip()
+        extracted_root = extract_model_zip(zip_path)
+        installed, zip_missing = install_missing_models(extracted_root)
 
-# ============================================================
-# 単独実行
-# ============================================================
+        _write(f"配置したファイル: {installed}")
+
+        if zip_missing:
+            _error("❌ ZIP内に必要ファイルが不足しています。")
+            for name in zip_missing[:30]:
+                _write(f"  - {name}")
+            if len(zip_missing) > 30:
+                _write(f"  ... 他 {len(zip_missing) - 30} 件")
+            return False
+
+    except Exception as exc:
+        _error(
+            f"❌ モデル準備に失敗しました: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+
+    final_missing = get_missing_model_files()
+    final_count = get_existing_model_count()
+
+    _write(f"=== Final Model Check ===")
+    _write(f"存在ファイル: {final_count}/{total}")
+
+    if final_missing:
+        _error(f"❌ まだ不足しているファイル: {len(final_missing)}")
+        for name in final_missing[:30]:
+            _write(f"  - {name}")
+        return False
+
+    _success("🎉 すべてのモデルファイルの準備が完了しました！")
+    return True
+
 
 if __name__ == "__main__":
-
     ok = download_models_from_gdrive()
-
-    if ok:
-        print("モデル準備完了")
-    else:
-        print("モデル準備失敗")
+    print("モデル準備完了" if ok else "モデル準備失敗")

@@ -25,12 +25,8 @@ import hashlib
 from datetime import datetime as dt
 import warnings
 import os
-import sys
-import subprocess
-import threading
-import time
-import shutil
-import json
+
+from model_downloader import download_models_from_gdrive
 
 # ==================================================================================
 # Suppress scikit-learn version warnings
@@ -54,265 +50,6 @@ def get_base_dir():
     return script_dir
 
 BASE_DIR = get_base_dir()
-
-
-# ==================================================================================
-# Google Drive Model Preparation
-# ==================================================================================
-TEMP_DIR = BASE_DIR / ".gdrive_temp"
-GOOGLE_DRIVE_FOLDER_ID = "11CrLEAr_ljmYx1Ib5TPpWG_kvwDElNgS"
-GOOGLE_DRIVE_FOLDER_URL = f"https://drive.google.com/drive/folders/{GOOGLE_DRIVE_FOLDER_ID}"
-
-
-def get_required_model_files():
-    """アプリで使用する214個のモデル関連ファイル一覧。"""
-    files = []
-
-    for suffix in ["toden", "tohoku"]:
-        files.extend([
-            f"model_{suffix}_power_weather.pkl",
-            f"scaler_{suffix}_power_weather.pkl",
-            f"feature_cols_{suffix}.pkl",
-        ])
-
-    for location in ["kumagaya", "sendai"]:
-        for model_type in ["原子力", "風力発電実績", "水力"]:
-            files.append(f"models/model_{location}_{model_type}.pkl")
-        files.append(f"models/scaler_{location}.pkl")
-
-    for location in ["kumagaya", "sendai"]:
-        for element in ["気温", "相対湿度", "降水量", "風速", "日射量", "天気"]:
-            files.append(f"Weather_Model/model_{location}_{element}.pkl")
-        files.append(f"Weather_Model/scaler_{location}.pkl")
-
-    combinations = [
-        ("01", "原子力"), ("02", "火力"), ("03", "水力"),
-        ("04", "太陽光発電実績"), ("05", "風力発電実績"),
-        ("06", "原子力_火力"), ("07", "原子力_水力"),
-        ("08", "原子力_太陽光発電実績"), ("09", "原子力_風力発電実績"),
-        ("10", "火力_水力"), ("11", "火力_太陽光発電実績"),
-        ("12", "火力_風力発電実績"), ("13", "水力_太陽光発電実績"),
-        ("14", "水力_風力発電実績"), ("15", "太陽光発電実績_風力発電実績"),
-        ("16", "原子力_火力_水力"), ("17", "原子力_火力_太陽光発電実績"),
-        ("18", "原子力_火力_風力発電実績"), ("19", "原子力_水力_太陽光発電実績"),
-        ("20", "原子力_水力_風力発電実績"),
-        ("21", "原子力_太陽光発電実績_風力発電実績"),
-        ("22", "火力_水力_太陽光発電実績"),
-        ("23", "火力_水力_風力発電実績"),
-        ("24", "火力_太陽光発電実績_風力発電実績"),
-        ("25", "水力_太陽光発電実績_風力発電実績"),
-        ("26", "原子力_火力_水力_太陽光発電実績"),
-        ("27", "原子力_火力_水力_風力発電実績"),
-        ("28", "原子力_火力_太陽光発電実績_風力発電実績"),
-        ("29", "原子力_水力_太陽光発電実績_風力発電実績"),
-        ("30", "火力_水力_太陽光発電実績_風力発電実績"),
-        ("31", "原子力_火力_水力_太陽光発電実績_風力発電実績"),
-    ]
-
-    for suffix in ["toden", "tohoku"]:
-        for number, combination in combinations:
-            files.append(f"Combine_Model/model_{suffix}_{number}_{combination}.pkl")
-            files.append(f"Combine_Model/scaler_{suffix}_{number}_{combination}.pkl")
-            files.append(f"Combine_Model/info_{suffix}_{number}_{combination}.json")
-
-    return files
-
-
-def get_missing_model_files():
-    return [
-        p for p in get_required_model_files()
-        if not (BASE_DIR / p).is_file()
-    ]
-
-
-def get_existing_model_count():
-    files = get_required_model_files()
-    existing = sum((BASE_DIR / p).is_file() for p in files)
-    return existing, len(files)
-
-
-def _run_gdrive_folder_manifest(result_holder):
-    """Google Drive共有フォルダをURLで解析し、ファイル一覧(ID/パス)を取得する。"""
-    code = r"""import sys
-import json
-import gdown
-folder_url = sys.argv[1]
-result = gdown.download_folder(
-    url=folder_url,
-    output=None,
-    quiet=True,
-    use_cookies=False,
-    skip_download=True,
-    timeout=(15, 60),
-    retries=3,
-)
-items = []
-for x in (result or []):
-    items.append({"id": str(x.id), "path": str(x.path)})
-print(json.dumps(items, ensure_ascii=False))
-"""
-    try:
-        process = subprocess.run(
-            [sys.executable, "-c", code, GOOGLE_DRIVE_FOLDER_URL],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        result_holder["stdout"] = process.stdout or ""
-        result_holder["stderr"] = process.stderr or ""
-        if process.returncode != 0:
-            result_holder["error"] = (process.stderr or process.stdout or "gdown folder manifest failed").strip()[-5000:]
-            return
-        # gdownのJSON以外の警告行を除去して最後のJSON配列を読む
-        lines = [x.strip() for x in (process.stdout or "").splitlines() if x.strip()]
-        json_line = next((x for x in reversed(lines) if x.startswith("[") and x.endswith("]")), None)
-        if json_line is None:
-            result_holder["error"] = "gdownは正常終了しましたが、フォルダ内ファイル一覧(JSON)を返しませんでした。"
-            return
-        result_holder["files"] = json.loads(json_line)
-    except Exception as e:
-        result_holder["error"] = f"{type(e).__name__}: {e}"
-
-
-def _download_file_with_gdown(file_id, destination, timeout_seconds=120):
-    """manifestで得たDrive file IDを1ファイルずつ保存する。"""
-    code = r"""import sys
-import gdown
-file_id = sys.argv[1]
-output = sys.argv[2]
-gdown.download(id=file_id, output=output, quiet=True, use_cookies=False, resume=True, timeout=(15, 60), retries=3)
-"""
-    try:
-        p = subprocess.run(
-            [sys.executable, "-c", code, str(file_id), str(destination)],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-        if p.returncode == 0 and Path(destination).is_file() and Path(destination).stat().st_size > 0:
-            return True, ""
-        return False, (p.stderr or p.stdout or "gdown download failed").strip()[-2000:]
-    except subprocess.TimeoutExpired:
-        return False, f"タイムアウト（{timeout_seconds}秒）"
-    except Exception as e:
-        return False, str(e)
-
-
-def download_models_from_gdrive(force=False):
-    """Google Drive共有フォルダをマニフェスト取得→必要ファイルをダウンロードする。"""
-    existing, total = get_existing_model_count()
-    st.write(f"📦 モデルファイル確認: {existing}/{total}")
-    missing = get_missing_model_files()
-    if not missing and not force:
-        st.success("✅ 必要なモデルファイルはすべて存在します。")
-        return True
-
-    st.warning(f"⚠️ モデルファイルが {len(missing)} 個不足しています。")
-    with st.expander("不足しているモデルファイル", expanded=False):
-        for file in missing[:100]:
-            st.write(f"- `{file}`")
-
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    st.info("📋 Google Drive共有フォルダのファイル一覧を取得します。")
-    st.code(f"Google Drive Folder URL:\n{GOOGLE_DRIVE_FOLDER_URL}")
-    st.write(f"一時保存先: `{TEMP_DIR}`")
-    try:
-        import gdown
-        st.write(f"gdown version: `{getattr(gdown, '__version__', 'unknown')}`")
-    except Exception as e:
-        st.error(f"❌ gdownを読み込めません: {e}")
-        return False
-
-    manifest_holder = {"files": None, "error": None, "stdout": "", "stderr": ""}
-    with st.spinner("🔎 Google Driveフォルダを解析中..."):
-        _run_gdrive_folder_manifest(manifest_holder)
-
-    if manifest_holder.get("error"):
-        st.error("❌ Google Driveフォルダの一覧取得に失敗しました。")
-        st.code(manifest_holder["error"])
-        if manifest_holder.get("stderr"):
-            with st.expander("gdown詳細ログ"):
-                st.text(manifest_holder["stderr"][-5000:])
-        return False
-
-    manifest = manifest_holder.get("files") or []
-    st.write(f"📋 Google Driveから取得したファイル一覧: **{len(manifest)}件**")
-    if not manifest:
-        st.error("❌ フォルダは認識できましたが、ファイル一覧が0件です。共有フォルダの公開範囲を確認してください。")
-        return False
-
-    # Drive側の相対パスを正規化し、必要ファイルと対応付ける。
-    required = set(get_required_model_files())
-    by_path = {}
-    by_tail = {}
-    for item in manifest:
-        path = str(item.get("path", "")).replace("\\", "/").lstrip("/")
-        fid = item.get("id")
-        if not path or not fid:
-            continue
-        by_path[path] = fid
-        parts = path.split("/")
-        if len(parts) > 1:
-            tail = "/".join(parts[1:])
-            by_tail.setdefault(tail, []).append(fid)
-
-    matches = {}
-    for req in required:
-        if req in by_path:
-            matches[req] = by_path[req]
-        elif len(by_tail.get(req, [])) == 1:
-            matches[req] = by_tail[req][0]
-
-    st.write(f"🔎 必要ファイルとの照合: **{len(matches)}/{total}件**")
-    unmatched = sorted(required - set(matches))
-    if unmatched:
-        with st.expander("Drive一覧に見つからないファイル", expanded=False):
-            for f in unmatched[:100]:
-                st.write(f"- `{f}`")
-        if len(matches) == 0:
-            st.error("❌ Driveフォルダは取得できましたが、アプリが要求するファイル名と1件も一致しませんでした。")
-            return False
-
-    progress = st.progress(0)
-    status = st.empty()
-    success = 0
-    failed = []
-    targets = [p for p in missing if p in matches]
-    for idx, req in enumerate(targets, 1):
-        dst = BASE_DIR / req
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        status.info(f"⬇️ モデル取得中 {idx}/{len(targets)}\n\n`{req}`")
-        ok, err = _download_file_with_gdown(matches[req], dst, timeout_seconds=120)
-        if ok:
-            success += 1
-        else:
-            failed.append(f"{req} : {err}")
-        progress.progress(min(idx / max(len(targets), 1), 1.0))
-
-    missing_after = get_missing_model_files()
-    shown = total - len(missing_after)
-    st.write(f"📦 モデルファイル確認: **{shown}/{total}**")
-    if not missing_after:
-        st.success("✅ モデルファイルの準備が完了しました。")
-        return True
-
-    st.error(f"❌ まだ {len(missing_after)} 個のモデルファイルが不足しています。")
-    with st.expander("取得失敗・不足ファイル"):
-        for f in missing_after[:100]:
-            st.write(f"- `{f}`")
-    if failed:
-        with st.expander("今回のgdownエラー詳細"):
-            for f in failed[:100]:
-                st.code(f)
-    return False
-
-
-@st.cache_resource
-def initialize_models_once():
-    """起動時にモデルを準備し、同一プロセスでは再取得しない。"""
-    if not get_missing_model_files():
-        return True
-    return download_models_from_gdrive()
 
 # ==================================================================================
 # Constants and Lists
@@ -965,6 +702,20 @@ def main():
         page_icon="⚡",
         layout="wide",
     )
+
+    # ------------------------------------------------------------
+    # モデル一式の準備
+    # Google Drive上の1個のZIPから必要ファイルを配置する。
+    # 完全に揃っている場合はネットワークアクセスしない。
+    # ------------------------------------------------------------
+    @st.cache_resource(show_spinner=False)
+    def _ensure_models_ready():
+        return download_models_from_gdrive()
+
+    if not _ensure_models_ready():
+        st.error("❌ モデルファイルの準備に失敗したため、アプリを起動できません。")
+        st.info("Streamlit Secrets の GDRIVE_MODEL_ZIP_ID に、モデル一式ZIPのGoogle DriveファイルIDを設定してください。")
+        st.stop()
     
     # セッション状態の初期化
     init_session_state()
@@ -981,10 +732,6 @@ def main():
     # ==================================================================================
     # Load Models
     # ==================================================================================
-    model_ready = initialize_models_once()
-    if not model_ready:
-        st.stop()
-
     model, scaler, feature_cols = load_models_and_data(model_suffix)
     
     # ==================================================================================
