@@ -210,11 +210,129 @@ gdown.download(id=file_id, output=output, quiet=True, use_cookies=False, resume=
 
 
 
-def download_models_from_gdrive(force=False):
-    """Google Driveから不足モデルを1ファイルずつ取得する。"""
-    existing, total = get_existing_model_count()
-    st.write(f"📦 モデルファイル確認: {existing}/{total}")
+def _normalize_drive_path(value):
+    value = str(value or "").replace("\\", "/").strip()
+    while value.startswith("./"):
+        value = value[2:]
+    return value.strip("/")
 
+
+def _find_drive_file_for_required_path(required_path, drive_files):
+    required = _normalize_drive_path(required_path)
+    for item in drive_files:
+        if _normalize_drive_path(getattr(item, "path", "")) == required:
+            return item
+    suffix = "/" + required
+    candidates = [item for item in drive_files if _normalize_drive_path(getattr(item, "path", "")).endswith(suffix)]
+    if len(candidates) == 1:
+        return candidates[0]
+    basename = Path(required).name
+    candidates = [item for item in drive_files if Path(_normalize_drive_path(getattr(item, "path", ""))).name == basename]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _download_one_file_subprocess_to_target(file_id, target_path, timeout_seconds=45, status_callback=None):
+    """
+    1ファイルを別プロセスで取得する診断版。
+    gdownのバージョン差による引数エラーも含め、stdout/stderr/tracebackを返す。
+    subprocess側で45秒を監視するため、gdown固有のtimeout/retries引数には依存しない。
+    """
+    code = r"""
+import sys
+import traceback
+import gdown
+
+file_id = sys.argv[1]
+output = sys.argv[2]
+
+print(f"[gdown診断] gdown version = {getattr(gdown, '__version__', 'unknown')}", flush=True)
+print(f"[gdown診断] file_id = {file_id}", flush=True)
+print(f"[gdown診断] output = {output}", flush=True)
+
+try:
+    # timeout/retriesはgdownのバージョン差で即時TypeErrorになる可能性があるため、
+    # ここでは指定せず、親プロセス側の45秒監視だけを使用する。
+    result = gdown.download(
+        id=file_id,
+        output=output,
+        quiet=False,
+        use_cookies=False,
+        resume=False,
+    )
+    print(f"[gdown診断] return = {result!r}", flush=True)
+    if result is None:
+        print("[gdown診断] WARNING: gdown.download() returned None", flush=True)
+        sys.exit(2)
+    sys.exit(0)
+except Exception as e:
+    print(f"[gdown診断] EXCEPTION: {type(e).__name__}: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+"""
+    process = None
+    start_time = time.time()
+    try:
+        # 既存の壊れた/途中までのファイルがあるとresumeで再利用されるため、
+        # 診断時は一旦削除して最初から取得する。
+        if target_path.exists():
+            try:
+                target_path.unlink()
+            except Exception:
+                pass
+
+        process = subprocess.Popen(
+            [sys.executable, "-c", code, str(file_id), str(target_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        while process.poll() is None:
+            elapsed = int(time.time() - start_time)
+            size = target_path.stat().st_size if target_path.is_file() else 0
+            if status_callback:
+                status_callback(elapsed, size)
+            if elapsed >= timeout_seconds:
+                process.kill()
+                try:
+                    stdout, stderr = process.communicate(timeout=3)
+                except Exception:
+                    stdout, stderr = "", ""
+                return False, (
+                    f"タイムアウト（{timeout_seconds}秒）\n"
+                    f"stdout: {(stdout or '').strip()[-1000:]}\n"
+                    f"stderr: {(stderr or '').strip()[-1000:]}"
+                )
+            time.sleep(1)
+
+        stdout, stderr = process.communicate()
+        out = (stdout or "").strip()
+        err = (stderr or "").strip()
+        combined = "\n".join(x for x in [out, err] if x)
+
+        if process.returncode != 0:
+            return False, combined[-3000:] if combined else f"gdown failed (returncode={process.returncode})"
+
+        if target_path.is_file() and target_path.stat().st_size > 0:
+            return True, combined[-3000:]
+
+        return False, (combined[-3000:] if combined else
+                       "ダウンロード後のファイルが存在しないかサイズ0です")
+    except Exception as e:
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        return False, f"親プロセス例外: {type(e).__name__}: {e}"
+
+
+def download_models_from_gdrive(force=False):
+    required_files = get_required_model_files()
+    total_models = len(required_files)
+    existing, _ = get_existing_model_count()
+    st.write(f"📦 モデルファイル確認: {existing}/{total_models}")
     missing = get_missing_model_files()
     if not missing and not force:
         st.success("✅ 必要なモデルファイルはすべて存在します。")
@@ -222,15 +340,8 @@ def download_models_from_gdrive(force=False):
 
     st.warning(f"⚠️ モデルファイルが {len(missing)} 個不足しています。")
     with st.expander("不足しているモデルファイル", expanded=False):
-        for file in missing[:100]:
-            st.write(f"- `{file}`")
-        if len(missing) > 100:
-            st.write(f"... その他 {len(missing) - 100} ファイル")
-
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    st.info("📥 Google Driveからモデルを取得します。\n\n初回のみ時間がかかる場合があります。")
-    st.code(f"Google Drive Folder ID:\n{GOOGLE_DRIVE_FOLDER_ID}")
-    st.write(f"一時保存先: `{TEMP_DIR}`")
+        for file in missing[:100]: st.write(f"- `{file}`")
+        if len(missing) > 100: st.write(f"... その他 {len(missing)-100} ファイル")
 
     try:
         import gdown
@@ -239,20 +350,18 @@ def download_models_from_gdrive(force=False):
         st.error(f"❌ gdownを読み込めません: {e}")
         return False
 
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
     st.write("🔄 Google Driveフォルダ取得を開始します...")
     result_holder = {"started": False, "finished": False, "result": None, "error": None}
     thread = threading.Thread(target=_run_gdrive_download, args=(result_holder,), daemon=True)
     thread.start()
-
-    list_timeout = 120
     list_start = time.time()
     list_status = st.empty()
     while thread.is_alive():
         elapsed = int(time.time() - list_start)
         list_status.info(f"📥 Google Driveのファイル一覧を取得中... {elapsed}秒経過")
-        if elapsed >= list_timeout:
+        if elapsed >= 120:
             list_status.error("❌ Google Driveのファイル一覧取得が2分を超えました。")
-            st.warning("Google Driveのフォルダ一覧を取得できませんでした。\n\nフォルダが「リンクを知っている全員」に公開されているか確認してください。")
             return False
         time.sleep(1)
 
@@ -260,122 +369,73 @@ def download_models_from_gdrive(force=False):
         list_status.error("❌ Google Driveのファイル一覧取得に失敗しました。")
         st.code(result_holder["error"])
         return False
-
     drive_files = result_holder.get("result") or []
     if not drive_files:
         st.error("❌ Google Driveフォルダ内のファイルが取得できませんでした。")
         return False
+    list_status.success(f"✅ Google Driveのファイル一覧取得完了: {len(drive_files)}ファイル")
 
-    total_models = total
+    file_map = {}
+    unmatched = []
+    for required in required_files:
+        item = _find_drive_file_for_required_path(required, drive_files)
+        if item is None: unmatched.append(required)
+        else: file_map[required] = item
+    st.write(f"🔎 Driveファイル照合: **{len(file_map)}/{total_models}** 件一致")
+    if unmatched:
+        with st.expander(f"⚠️ Drive上で対応付けできなかったファイル: {len(unmatched)}件", expanded=False):
+            for name in unmatched[:100]: st.write(f"- `{name}`")
+
     progress = st.progress(0)
     status = st.empty()
-    completed = 0
-    failed = []
+    completed = existing
+    failed = list(unmatched)
+    process_count = 0
 
-    # 一覧取得後は1ファイルずつ別プロセスで処理する。
-    # 処理中も1秒ごとに画面を更新し、「止まっている」のか「通信中」なのかを確認できるようにする。
-    for index, drive_file in enumerate(drive_files, start=1):
-        local_path = Path(drive_file.local_path)
-        file_name = str(getattr(drive_file, "path", local_path))
+    for required_path in required_files:
+        target_path = BASE_DIR / required_path
+        if target_path.is_file() and target_path.stat().st_size > 0 and not force:
+            continue
+        process_count += 1
+        drive_file = file_map.get(required_path)
+        if drive_file is None:
+            status.warning(f"⚠️ 対応するDriveファイルなし: `{required_path}`")
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        current_status = st.empty()
+        current_progress = st.progress(0)
+        def update_current(elapsed, size):
+            mb = size / (1024*1024) if size else 0
+            current_status.info(f"⬇️ **ダウンロード中**\n\n📊 完了: **{completed}/{total_models}**\n📄 Drive: `{getattr(drive_file, 'path', required_path)}`\n📁 保存先: `{required_path}`\n⏱️ 経過: **{elapsed}秒 / 45秒**\n💾 ファイルサイズ: **{mb:.2f} MB**\n⏳ タイムアウトまで: **{max(0,45-elapsed)}秒**")
+            current_progress.progress(min(elapsed/45, 0.99))
         file_start = time.time()
-        try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
+        ok, error_message = _download_one_file_subprocess_to_target(drive_file.id, target_path, 45, update_current)
+        elapsed = int(time.time()-file_start)
+        try: current_progress.empty(); current_status.empty()
+        except Exception: pass
+        if ok:
+            completed += 1
+            status.success(f"✅ 成功 **{completed}/{total_models}** | `{required_path}` | {elapsed}秒")
+        else:
+            failed.append(f"{required_path} : {error_message}")
+            status.error(f"❌ 失敗 **{completed}/{total_models}** | `{required_path}` | {elapsed}秒")
+            with st.expander(f"🔎 失敗の詳細: {required_path}", expanded=True):
+                st.code(error_message or "エラー詳細なし")
+            status.warning(f"次のファイルへ進みます")
+        progress.progress(min(completed/total_models, 1.0))
+        st.caption(f"現在: {completed}/{total_models} | 今回処理: {process_count} | 失敗: {len(failed)}")
 
-            if local_path.is_file() and local_path.stat().st_size > 0:
-                completed += 1
-                elapsed = int(time.time() - file_start)
-                status.info(
-                    f"✅ 完了 {completed}/{total_models} | {file_name} | 既存ファイルを使用"
-                )
-            else:
-                current_status = st.empty()
-                current_progress = st.progress(0)
-
-                def update_current(elapsed, size):
-                    mb = size / (1024 * 1024) if size else 0
-                    remaining = max(0, 45 - elapsed)
-                    current_status.info(
-                        f"⬇️ 処理中 {completed + 1}/{total_models}\n\n"
-                        f"📄 ファイル: `{file_name}`\n"
-                        f"⏱️ 経過: **{elapsed}秒** / 45秒\n"
-                        f"💾 現在のファイルサイズ: **{mb:.2f} MB**\n"
-                        f"⏳ タイムアウトまで: **{remaining}秒**\n"
-                        f"🔄 状態: Google Driveからダウンロード中..."
-                    )
-                    current_progress.progress(min(elapsed / 45, 0.99))
-
-                ok, error_message = _download_one_file_subprocess(
-                    drive_file.id, local_path, timeout_seconds=45, status_callback=update_current
-                )
-
-                elapsed = int(time.time() - file_start)
-                try:
-                    current_progress.empty()
-                    current_status.empty()
-                except Exception:
-                    pass
-
-                if ok:
-                    completed += 1
-                    status.success(
-                        f"✅ 成功 {completed}/{total_models} | {file_name} | 所要 {elapsed}秒"
-                    )
-                else:
-                    failed.append(f"{file_name} : {error_message}" if error_message else file_name)
-                    status.warning(
-                        f"⚠️ スキップ {completed}/{total_models} | {file_name} | "
-                        f"所要 {elapsed}秒 | {error_message or '取得失敗'} → 次のファイルへ"
-                    )
-        except Exception as e:
-            failed.append(f"{file_name} : {e}")
-            status.error(f"❌ エラー | {file_name} | {e} → 次のファイルへ")
-
-        # 全体進捗は「実際に存在するモデル数」で表示
-        shown = min(completed, total_models)
-        percent = int(shown / total_models * 100) if total_models else 0
-        progress.progress(min(percent, 99))
-
-        # 現在の位置と処理済み/失敗数を明示
-        status.info(
-            f"📥 Google Driveからモデルを取得中... **{shown}/{total_models} ファイル** | "
-            f"一覧上の処理位置: {index}/{len(drive_files)} | "
-            f"成功: {completed} | 失敗: {len(failed)}"
-        )
-
-    st.write("📂 ダウンロードしたモデルを配置しています...")
-    copied = 0
-    if TEMP_DIR.exists():
-        for src_file in TEMP_DIR.rglob("*"):
-            if not src_file.is_file():
-                continue
-            try:
-                relative = src_file.relative_to(TEMP_DIR)
-                dst = BASE_DIR / relative
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dst)
-                copied += 1
-            except Exception as e:
-                st.warning(f"⚠️ ファイル配置失敗: {src_file.name} / {e}")
-    st.write(f"📦 {copied} ファイルを配置しました。")
-
-    missing_after = get_missing_model_files()
-    if not missing_after:
-        progress.progress(100)
-        status.success(f"📥 Google Driveからモデルを取得中... {total_models}/{total_models} ファイル")
-        st.success("✅ モデルファイルの準備が完了しました。")
-        return True
-
-    shown = total_models - len(missing_after)
-    progress.progress(min(int(shown / total_models * 100), 99))
-    status.warning(f"📥 Google Driveからモデルを取得中... {shown}/{total_models} ファイル")
-    st.error(f"❌ モデルがまだ {len(missing_after)} 個不足しています。")
-    with st.expander("取得できなかったファイル"):
-        for file in missing_after[:100]:
-            st.write(f"- `{file}`")
+    final_existing, final_total = get_existing_model_count()
+    progress.progress(min(final_existing/final_total, 1.0))
+    st.write(f"📦 最終確認: **{final_existing}/{final_total}** ファイル")
     if failed:
-        with st.expander("今回の取得で失敗したファイル"):
-            for file in failed[:100]:
-                st.write(f"- `{file}`")
+        st.error(f"❌ 取得できなかったファイル: {len(failed)}件")
+        with st.expander("取得失敗ファイル一覧", expanded=False):
+            for item in failed: st.write(f"- {item}")
+    if final_existing == final_total:
+        st.success("🎉 214個すべてのモデルファイルを取得・配置しました。")
+        return True
+    st.warning(f"⚠️ {final_total-final_existing}個のモデルファイルが不足しています。")
     return False
 
 
