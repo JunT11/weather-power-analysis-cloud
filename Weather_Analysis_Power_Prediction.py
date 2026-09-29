@@ -1762,7 +1762,6 @@ def main():
                     unitp_base_dir / "UP_Model",
                     unitp_base_dir / "models" / "UnitP_Model",
                 ]
-            })
             
             st.dataframe(info_df, width='stretch', hide_index=True)
     
