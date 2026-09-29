@@ -3,7 +3,7 @@
 Streamlit Cloud 用モデルダウンローダー
 
 Google Drive 上の「モデル一式ZIP」を1ファイルだけ gdown で取得し、
-models / Weather_Model / Combine_Model とルート直下へ展開する。
+models / Weather_Model / Combine_Model / UP_Model とルート直下へ展開する。
 
 設計方針:
 - Google Drive API / google.oauth2 は使用しない
@@ -46,6 +46,7 @@ MODEL_DIRS = [
     "models",
     "Weather_Model",
     "Combine_Model",
+    "UP_Model",
 ]
 
 # Google Drive にアップロードした「モデル一式ZIP」のファイルID。
@@ -130,6 +131,21 @@ def _required_weather_files() -> list[str]:
     return files
 
 
+def _required_up_model_files() -> list[str]:
+    """UP_Model に必要なモデル・メタデータファイルを返す。"""
+    files: list[str] = []
+
+    for location in ("kumagaya", "sendai"):
+        # 発電種別ごとのUP Model
+        for element in ("火力", "原子力", "水力", "太陽光", "風力"):
+            files.append(f"UP_Model/up_model_{location}_{element}.pkl")
+
+        # UP Model のメタデータ
+        files.append(f"UP_Model/UnitP_Model_metadata_{location}.json")
+
+    return files
+
+
 def _required_combine_files() -> list[str]:
     combinations = [
         ("原子力", "01"),
@@ -186,6 +202,7 @@ def get_required_model_files() -> list[str]:
         _required_root_files()
         + _required_models_files()
         + _required_weather_files()
+        + _required_up_model_files()
         + _required_combine_files()
     )
 

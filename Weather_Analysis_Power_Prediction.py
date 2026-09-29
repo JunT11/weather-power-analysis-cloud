@@ -17,6 +17,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pickle
+import json
 import joblib
 import datetime
 import plotly.graph_objects as go
@@ -83,7 +84,7 @@ def load_models_and_data(model_suffix):
     モデルとスケーラーをロード
     複数ユーザー間で安全に共用できる
     """
-    work_dir = BASE_DIR
+    work_dir = Path(__file__).parent
     
     model_file = work_dir / f"model_{model_suffix}_power_weather.pkl"
     scaler_file = work_dir / f"scaler_{model_suffix}_power_weather.pkl"
@@ -121,7 +122,7 @@ def load_power_prediction_models(location_name):
     scaler : StandardScaler
         火力と太陽光の標準化用スケーラー（2次元）
     """
-    work_dir = BASE_DIR / "models"
+    work_dir = Path(__file__).parent / "models"
     
     models_dict = {}
     
@@ -324,7 +325,7 @@ def load_weather_prediction_models(location_name):
     scaler : StandardScaler
         特徴量の標準化用スケーラー
     """
-    work_dir = BASE_DIR / "Weather_Model"
+    work_dir = Path(__file__).parent / "Weather_Model"
     
     models_dict = {}
     
@@ -563,7 +564,7 @@ def load_combine_model(location_name, combination_name):
     feature_names : list
         出力特徴量の名前
     """
-    work_dir = BASE_DIR / "Combine_Model"
+    work_dir = Path(__file__).parent / "Combine_Model"
     
     # モデルサフィックスを決定
     model_suffix = "toden" if location_name == "kumagaya" else "tohoku"
@@ -1026,14 +1027,13 @@ def main():
     # ==================================================================================
     # Section 2: AI Prediction
     # ==================================================================================
-    st.header("🤖 AIでデータを予測してみよう")
-    
-    # ==================================================================================
-    # Section 2-1: Predict Weather from DateTime
-    # ==================================================================================
     if df is not None:
+        st.header("🤖 AIでデータを予測してみよう") 
+        # ==================================================================================
+        # Section 2-1: Predict Weather from DateTime
+        # ==================================================================================
         with st.container(border=True):
-            st.subheader("2-1. 日時から気象情報を予測")
+            st.subheader("2-1. 日時から気象情報を予測しよう⛅")
             
             st.info(
                 "**予測モデルの仕様**\n\n"
@@ -1069,56 +1069,71 @@ def main():
             
             with col1:
                 st.write("**日時情報を入力**")
-                
-                pred_year = st.number_input(
-                    '年',
-                    min_value=2026,
-                    max_value=2040,
-                    value=2026,
-                    step=1,
-                    key="weather_pred_year"
-                )
-                
-                pred_month = st.selectbox(
-                    '月',
-                    list(range(1, 13)),
-                    index=9,  # デフォルト10月
-                    key="weather_pred_month",
-                    format_func=lambda x: f"{x:02d}月"
-                )
-                
-                pred_day = st.number_input(
-                    '日',
-                    min_value=1,
-                    max_value=31,
-                    value=1,
-                    step=1,
-                    key="weather_pred_day"
-                )
-                
-                pred_hour = st.selectbox(
-                    '時間',
-                    list(range(24)),
-                    index=12,  # デフォルト12時
-                    key="weather_pred_hour",
-                    format_func=lambda x: f"{x:02d}:00"
-                )
-            
+
+                date_col1, date_col2, date_col3, date_col4 = st.columns(4)
+
+                with date_col1:
+                    pred_year = st.number_input(
+                        '年',
+                        min_value=2026,
+                        max_value=2040,
+                        value=2026,
+                        step=1,
+                        key="weather_pred_year"
+                    )
+
+                with date_col2:
+                    pred_month = st.selectbox(
+                        '月',
+                        list(range(1, 13)),
+                        index=9,
+                        key="weather_pred_month",
+                        format_func=lambda x: f"{x:02d}"
+                    )
+
+                with date_col3:
+                    pred_day = st.number_input(
+                        '日',
+                        min_value=1,
+                        max_value=31,
+                        value=1,
+                        step=1,
+                        key="weather_pred_day"
+                    )
+
+                with date_col4:
+                    pred_hour = st.selectbox(
+                        '時間',
+                        list(range(24)),
+                        index=12,
+                        key="weather_pred_hour",
+                        format_func=lambda x: f"{x:02d}:00"
+                    )
+
             with col2:
                 st.write("**入力した日時**")
+
                 try:
-                    date_obj = datetime.date(int(pred_year), int(pred_month), int(pred_day))
+                    date_obj = datetime.date(
+                        int(pred_year),
+                        int(pred_month),
+                        int(pred_day)
+                    )
+
                     weekday_jp = Weekday_List[date_obj.weekday()]
                     st.info(
                         f"🗓️ {date_obj.strftime('%Y年%m月%d日')} "
-                        f"{int(pred_hour):02d}:00\n\n"
-                        f"曜日：{weekday_jp}"
+                        f"{int(pred_hour):02d}:00　（{weekday_jp}）"
                     )
                 except ValueError:
                     st.warning("⚠️ 無効な日付です（例：2月30日など）")
             
             # 予測ボタン
-            if st.button("🔮 気象を予測", key=f"predict_weather_{location_name}", width='stretch'):
+            if st.button(
+                "🔮 気象を予測",
+                key=f"predict_weather_{location_name}",
+                width='stretch'
+            ):
                 try:
                     # モデルをロード
                     models_dict, scaler = load_weather_prediction_models(location_name)
@@ -1133,526 +1148,619 @@ def main():
                             int(pred_day),
                             int(pred_hour)
                         )
-                        
+
+                        # ★ 予測結果をSession Stateに保存
+                        st.session_state["weather_prediction_result"] = weather_pred
+                        st.session_state["weather_prediction_date"] = date_obj
+                        st.session_state["weather_prediction_hour"] = int(pred_hour)
+                        st.session_state["weather_prediction_location"] = location_name
+
                         st.success("✓ 気象予測が完了しました")
-                        
-                        # デバッグ情報：入力値を表示
-                        with st.expander("📊 デバッグ情報（入力値と正規化値）"):
-                            debug_input = pd.DataFrame({
-                                "項目": ["年", "月", "日", "時間", "曜日"],
-                                "値": [
-                                    str(pred_year),
-                                    f"{pred_month:02d}",
-                                    f"{pred_day:02d}",
-                                    f"{pred_hour:02d}:00",
-                                    Weekday_List[datetime.date(int(pred_year), int(pred_month), int(pred_day)).weekday()]
-                                ]
-                            })
-                            st.dataframe(debug_input, use_container_width=True, hide_index=True)
-                            
-                            # スケーラー適用前後の特徴量を表示
-                            if 'weather_debug_info' in st.session_state:
-                                debug_info = st.session_state['weather_debug_info']
-                                st.write("**入力特徴量（正規化前）：**")
-                                feature_names = ['hour', 'day_of_week', 'month', 'day', 'season', 'hour_sin', 'hour_cos', 'month_sin', 'month_cos', 'day_sin', 'day_cos']
-                                for i, (name, value) in enumerate(zip(feature_names, debug_info.get('input_raw', []))):
-                                    st.write(f"  {i}: {name:12} = {value:.4f}")
-                                
-                                st.write("**入力特徴量（正規化後）：**")
-                                for i, (name, value) in enumerate(zip(feature_names, debug_info.get('input_scaled', []))):
-                                    st.write(f"  {i}: {name:12} = {value:.4f}")
-                                
-                                # スケーラーの統計情報を表示
-                                st.write("**スケーラー統計情報（訓練時）：**")
-                                st.write("平均値（mean）：")
-                                for i, (name, value) in enumerate(zip(feature_names, scaler.mean_)):
-                                    st.write(f"  {i}: {name:12} = {value:.4f}")
-                                
-                                st.write("標準偏差（scale）：")
-                                for i, (name, value) in enumerate(zip(feature_names, scaler.scale_)):
-                                    st.write(f"  {i}: {name:12} = {value:.4f}")
-                        
-                        # 結果を表示
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.metric(
-                                "気温",
-                                f"{weather_pred.get('気温', 0):.1f}°C"
-                            )
-                            st.metric(
-                                "相対湿度",
-                                f"{weather_pred.get('相対湿度', 0):.1f}%"
-                            )
-                        
-                        with col2:
-                            st.metric(
-                                "降水量",
-                                f"{weather_pred.get('降水量', 0):.1f}mm"
-                            )
-                            st.metric(
-                                "風速",
-                                f"{weather_pred.get('風速', 0):.1f}m/s"
-                            )
-                        
-                        with col3:
-                            st.metric(
-                                "日射量",
-                                f"{weather_pred.get('日射量', 0):.1f}W/m²"
-                            )
-                            st.metric(
-                                "天気",
-                                f"{weather_pred.get('天気', 0):.2f}"
-                            )
-                        
-                        # 詳細テーブル
-                        st.subheader("📊 予測結果の詳細")
-                        
-                        result_df = pd.DataFrame({
-                            "気象要素": ["気温", "相対湿度", "降水量", "風速", "日射量", "天気"],
-                            "予測値": [
-                                f"{weather_pred.get('気温', 0):.2f}°C",
-                                f"{weather_pred.get('相対湿度', 0):.2f}%",
-                                f"{weather_pred.get('降水量', 0):.2f}mm",
-                                f"{weather_pred.get('風速', 0):.2f}m/s",
-                                f"{weather_pred.get('日射量', 0):.2f}W/m²",
-                                f"{weather_pred.get('天気', 0):.4f}"
-                            ]
-                        })
-                        
-                        st.dataframe(result_df, width='stretch', hide_index=True)
+
                     else:
                         st.error("❌ モデルの読み込みに失敗しました。")
-                
+
                 except Exception as e:
                     st.error(f"❌ 予測中にエラーが発生しました: {str(e)}")
+
+
+            # ============================================================
+            # 予測結果表示
+            # ============================================================
+            if "weather_prediction_result" in st.session_state:
+
+                weather_pred = st.session_state["weather_prediction_result"]
+
+                prediction_date = st.session_state.get(
+                    "weather_prediction_date",
+                    date_obj
+                )
+
+                prediction_hour = st.session_state.get(
+                    "weather_prediction_hour",
+                    int(pred_hour)
+                )
+
+                st.success(
+                    f"✓ 気象予測結果："
+                    f"{prediction_date.strftime('%Y年%m月%d日')} "
+                    f"{prediction_hour:02d}:00"
+                )
+
+                # 結果を表示
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "気温",
+                        f"{weather_pred.get('気温', 0):.1f}°C"
+                    )
+                    st.metric(
+                        "相対湿度",
+                        f"{weather_pred.get('相対湿度', 0):.1f}%"
+                    )
+
+                with col2:
+                    st.metric(
+                        "降水量",
+                        f"{weather_pred.get('降水量', 0):.1f}mm"
+                    )
+                    st.metric(
+                        "風速",
+                        f"{weather_pred.get('風速', 0):.1f}m/s"
+                    )
+
+                with col3:
+                    st.metric(
+                        "日射量",
+                        f"{weather_pred.get('日射量', 0):.1f}W/m²"
+                    )
+                    st.metric(
+                        "天気",
+                        f"{weather_pred.get('天気', 0):.2f}"
+                    )
+
+                # 詳細テーブル
+                st.subheader("📊 予測結果の詳細")
+
+                result_df = pd.DataFrame({
+                    "気象要素": [
+                        "気温",
+                        "相対湿度",
+                        "降水量",
+                        "風速",
+                        "日射量",
+                        "天気"
+                    ],
+                    "予測値": [
+                        f"{weather_pred.get('気温', 0):.2f}°C",
+                        f"{weather_pred.get('相対湿度', 0):.2f}%",
+                        f"{weather_pred.get('降水量', 0):.2f}mm",
+                        f"{weather_pred.get('風速', 0):.2f}m/s",
+                        f"{weather_pred.get('日射量', 0):.2f}W/m²",
+                        f"{weather_pred.get('天気', 0):.4f}"
+                    ]
+                })
+
+                st.dataframe(
+                    result_df,
+                    width='stretch',
+                    hide_index=True
+                )
     
-    # ==================================================================================
-    # Section 2-2: Predict Power from Weather
-    # ==================================================================================
-    with st.container(border=True):
-        st.subheader("2-2. 予測条件を入力")
-
-        # ==========================================
-        # 表示する発電方式
-        # ==========================================
-        st.write("**表示する発電方式**")
-        col_chk1, col_chk2, col_chk3, col_chk4, col_chk5 = st.columns(5)
-
-        with col_chk1:
-            show_thermal = st.checkbox("🔥火力", value=True)
-        with col_chk2:
-            show_solar_power = st.checkbox("☀️太陽光", value=False)
-        with col_chk3:
-            show_wind = st.checkbox("🌬️風力", value=False)
-        with col_chk4:
-            show_hydro = st.checkbox("💧水力", value=False)
-        with col_chk5:
-            show_nuclear = st.checkbox("☢️原子力", value=False)  
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.write("**日時情報**")
-            min_date = datetime.date(2026, 10, 1)
-            max_date = datetime.date(2040, 12, 31)
-            pred_date = st.date_input(
-                '予測したい日',
-                datetime.date(2026, 10, 1),
-                min_value=min_date,
-                max_value=max_date,
-                key=f"date_{model_suffix}"
-            )
-            
-            select_hour = st.selectbox(
-                '時間を選択',
-                list(range(24)),
-                index=12,
-                key=f"hour_{model_suffix}"
-            )
-            
-            # 日付情報を取得
-            select_month = pred_date.month
-            select_day = pred_date.day
-            select_weekday = pred_date.weekday()
-            
-            st.info(
-                f"🗓️ {pred_date.strftime('%Y年%m月%d日')} "
-                f"{select_hour}時 ({Weekday_List[select_weekday]})"
-            )
-        
-        with col2:
-            st.write("**気象条件**")
-            
-            temp_options = list(np.arange(0, 41, 1))
-            select_temp = st.selectbox(
-                '気温(℃)',
-                temp_options,
-                index=20,
-                key=f"temp_{model_suffix}"
-            )
-            
-            rain_options = [0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
-            select_rain = st.selectbox(
-                '降水量(mm)',
-                rain_options,
-                index=0,
-                key=f"rain_{model_suffix}"
-            )
-            
-            wind_options = list(np.arange(0, 21, 1))
-            select_wind = st.selectbox(
-                '風速(m/s)',
-                wind_options,
-                index=3,
-                key=f"wind_{model_suffix}"
-            )
-        
-        with col3:
-            st.write("**その他**")
-            
-            humidity_options = list(range(0, 101, 10))
-            select_humidity = st.selectbox(
-                '相対湿度(%)',
-                humidity_options,
-                index=6,
-                key=f"humidity_{model_suffix}"
-            )
-
-            solar_options = list(np.arange(0, 1001, 50))
-            select_solar = st.selectbox(
-                '日射量(W/m²)',
-                solar_options,
-                index=3,
-                key=f"solar_{model_suffix}"
-            )
-            
-            # 天気をエンコード（シンプルな分類）
-            weather_types = ["晴れ", "曇り", "雨", "雪"]
-            select_weather = st.selectbox(
-                '天気',
-                weather_types,
-                index=0,
-                key=f"weather_{model_suffix}"
-            )
-            weather_encoded = weather_types.index(select_weather)
-        
         # ==================================================================================
-        # Section 2-2: Prediction Button & Results
+        # Section 2-2: Predict Power from Weather
         # ==================================================================================
-        if st.button("🔮 AI予測スタート", key=f"predict_{model_suffix}", width='stretch'):
-            # チェックボックスの状態から、対応するモデルの組み合わせ名を取得
-            combination_name = get_model_combination_name(
-                show_nuclear,
-                show_thermal,
-                show_hydro,
-                show_solar_power,
-                show_wind
-            )
-            
-            # チェックボックスが何も選ばれていない場合はエラーを表示
-            if combination_name is None:
-                st.error("❌ 予測する発電方式を最低1つ選択してください")
-            else:
-                try:
-                    # location_nameをsession_stateから取得
-                    location_name = None
-                    if 'uploaded_file_name' in st.session_state:
-                        uploaded_file_name = st.session_state.uploaded_file_name
-                        if "Kumagaya" in uploaded_file_name:
-                            location_name = "kumagaya"
-                        elif "Sendai" in uploaded_file_name:
-                            location_name = "sendai"
-                    
-                    if location_name is None:
-                        location_name = "kumagaya"  # デフォルト
-                    
-                    # Combine_Modelからモデルをロード
-                    combine_model, combine_scaler, feature_names = load_combine_model(location_name, combination_name)
-                    
-                    if combine_model is not None:
-                        # 入力データを準備
-                        input_data = {
-                            '気温': select_temp,
-                            '降水量': select_rain,
-                            '風速': select_wind,
-                            '相対湿度': select_humidity,
-                            '日射量': select_solar,
-                            '月': select_month,
-                            '時間': select_hour,
-                            '曜日': select_weekday,
-                            '日': select_day,
-                            '季節': get_season(select_month)
-                        }
-                        
-                        # 予測実行
-                        predictions = predict_combine_model(combine_model, combine_scaler, input_data)
-                        
-                        st.success("✓ 予測が完了しました")
-                        
-                        # 結果を表示
-                        result_data = {}
-                        for i, name in enumerate(feature_names):
-                            result_data[name] = max(0, round(float(predictions[i]), 1))
-                        
-                        total = sum(result_data.values())
-                        
-                        # メトリクスで表示
-                        cols = st.columns(len(result_data))
-                        for idx, (name, value) in enumerate(result_data.items()):
-                            with cols[idx]:
-                                st.metric(
-                                    f"{name}",
-                                    f"{value:,.0f}MW",
-                                    delta=f"{(value/total*100):.1f}%" if total > 0 else "0%",
-                                    delta_color="off"
-                                )
-                        
-                        # 棒グラフで表示
-                        fig_result = go.Figure(data=[
-                            go.Bar(
-                                x=list(result_data.keys()),
-                                y=list(result_data.values()),
-                                marker=dict(color=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2'][:len(result_data)]),
-                                text=[f'{v:,.0f}MW' for v in result_data.values()],
-                                textposition='auto',
-                            )
-                        ])
-                        
-                        fig_result.update_layout(
-                            title='電力供給構成の予測（棒グラフ）',
-                            yaxis_title='発電量(MW)',
-                            plot_bgcolor='white',
-                            height=400,
-                            showlegend=False
-                        )
-                        
-                        # 円グラフで表示
-                        fig_pie = go.Figure(data=[
-                            go.Pie(
-                                labels=list(result_data.keys()),
-                                values=list(result_data.values()),
-                                marker=dict(colors=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2'][:len(result_data)]),
-                                textposition='inside',
-                                textinfo='label+percent'
-                            )
-                        ])
-                        
-                        fig_pie.update_layout(
-                            title='電力供給構成の予測（円グラフ）',
-                            height=400,
-                        )
-                        
-                        # 2列に配置
-                        col_chart1, col_chart2 = st.columns(2)
-                        
-                        with col_chart1:
-                            st.plotly_chart(fig_result, use_container_width=True)
-                        
-                        with col_chart2:
-                            st.plotly_chart(fig_pie, use_container_width=True)
-                        
-                        # 詳細情報
-                        st.subheader("詳細情報")
-                        
-                        info_col1, info_col2 = st.columns(2)
-                        
-                        with info_col1:
-                            st.write("**入力条件**")
-                            info_df = pd.DataFrame({
-                                "項目": ["日時", "気温", "降水量", "風速", "相対湿度", "日射量", "天気"],
-                                "値": [
-                                    f"{pred_date.strftime('%Y/%m/%d %H:00')}",
-                                    f"{select_temp}℃",
-                                    f"{select_rain}mm",
-                                    f"{select_wind}m/s",
-                                    f"{select_humidity}%",
-                                    f"{select_solar}W/m²",
-                                    select_weather
-                                ]
-                            })
-                            st.dataframe(info_df, width='stretch', hide_index=True)
-                        
-                        with info_col2:
-                            st.write("**予測結果**")
-                            result_display = list(result_data.items()) + [("合計", total)]
-                            result_df = pd.DataFrame(result_display, columns=["発電方式", "発電量(MW)"])
-                            result_df["構成比"] = result_df["発電量(MW)"].apply(
-                                lambda x: f"{(x/total*100):.1f}%" if total > 0 else "0%"
-                            )
-                            st.dataframe(result_df, width='stretch', hide_index=True)
-                    else:
-                        st.error("❌ モデルの読み込みに失敗しました")
-                
-                except Exception as e:
-                    st.error(f"❌ 予測中にエラーが発生しました: {str(e)}")
+        with st.container(border=True):
+            st.subheader("2-2. 発電条件の組み合わせで予測しよう⚡")
     
-    # ==================================================================================
-    # Section 2-3: Predict Other Power Sources from Thermal & Solar
-    # ==================================================================================
-    st.header("🔌 火力と太陽光から発電源を予測")
+            # ==========================================
+            # 表示する発電方式
+            # ==========================================
+            st.write("**表示する発電方式**")
+            col_chk1, col_chk2, col_chk3, col_chk4, col_chk5 = st.columns(5)
     
-    with st.container(border=True):
-        st.subheader("2-3. 火力と太陽光から他の発電源を予測")
-        
-        st.info(
-            "**予測モデルの仕様**\n\n"
-            "• 入力値：火力発電（合計）+ 太陽光発電のみ\n"
-            "• 出力：原子力・風力・水力の発電量を予測\n"
-            "• 気象情報・時系列情報は使用しません\n"
-            "• 火力は個別種類（LNG・石炭・石油）ではなく合計値から計算します"
-        )
-        
-        # 位置情報を取得（熊谷 or 仙台）
-        location_mapping = {
-            "東京電力（Toden）": "kumagaya",
-            "東北電力（Tohoku）": "sendai"
-        }
-        location_name = location_mapping[selected_region]
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**発電量の入力**")
-            thermal_input = st.number_input(
-                '火力発電合計(MW)',
-                min_value=0.0,
-                max_value=50000.0,
-                value=10000.0,
-                step=500.0,
-                key=f"thermal_input_{model_suffix}",
-                help="火力発電の合計値（LNG、石炭、石油の合計）"
-            )
-            
-            solar_input = st.number_input(
-                '太陽光発電(MW)',
-                min_value=0.0,
-                max_value=10000.0,
-                value=2000.0,
-                step=100.0,
-                key=f"solar_input_{model_suffix}",
-                help="太陽光発電の実績値"
-            )
-        
-        # 予測実行ボタン
-        if st.button("🔮 発電源を予測", key=f"predict_2_2_{model_suffix}", width='stretch'):
-            # モデルをロード
-            models_dict, scaler_2_2 = load_power_prediction_models(location_name)
-            
-            # 予測実行
-            predictions_2_2 = predict_from_thermal_solar(
-                models_dict,
-                scaler_2_2,
-                thermal_input,
-                solar_input,
-                {}  # 入力データは不使用（火力と太陽光のみで予測）
-            )
-            
-            # 結果を整理
-            result_nuclear = max(0, round(predictions_2_2.get('原子力', 0), 1))
-            result_wind = max(0, round(predictions_2_2.get('風力発電実績', 0), 1))
-            result_hydro = max(0, round(predictions_2_2.get('水力', 0), 1))
-            
-            # 火力と太陽光を含めた合計
-            total_all = thermal_input + solar_input + result_nuclear + result_wind + result_hydro
-            
-            st.success("✓ 予測が完了しました")
-            
-            # 予測結果をメトリクスで表示（予測した発電源のみ）
-            st.subheader("📊 予測結果")
+            with col_chk1:
+                show_thermal = st.checkbox("🔥火力", value=True)
+            with col_chk2:
+                show_solar_power = st.checkbox("☀️太陽光", value=False)
+            with col_chk3:
+                show_wind = st.checkbox("🌬️風力", value=False)
+            with col_chk4:
+                show_hydro = st.checkbox("💧水力", value=False)
+            with col_chk5:
+                show_nuclear = st.checkbox("☢️原子力", value=False)  
             
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric(
-                    "原子力発電（予測）",
-                    f"{result_nuclear:,.0f}MW",
-                    delta=f"{(result_nuclear/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    delta_color="off"
+                st.write("**日時情報**")
+                min_date = datetime.date(2026, 10, 1)
+                max_date = datetime.date(2040, 12, 31)
+                pred_date = st.date_input(
+                    '予測したい日',
+                    datetime.date(2026, 10, 1),
+                    min_value=min_date,
+                    max_value=max_date,
+                    key=f"date_{model_suffix}"
+                )
+                
+                select_hour = st.selectbox(
+                    '時間を選択',
+                    list(range(24)),
+                    index=12,
+                    key=f"hour_{model_suffix}"
+                )
+                
+                # 日付情報を取得
+                select_month = pred_date.month
+                select_day = pred_date.day
+                select_weekday = pred_date.weekday()
+                
+                st.info(
+                    f"🗓️ {pred_date.strftime('%Y年%m月%d日')} "
+                    f"{select_hour}時 ({Weekday_List[select_weekday]})"
                 )
             
             with col2:
-                st.metric(
-                    "風力発電（予測）",
-                    f"{result_wind:,.0f}MW",
-                    delta=f"{(result_wind/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    delta_color="off"
+                st.write("**気象条件**")
+                
+                temp_options = list(np.arange(0, 41, 1))
+                select_temp = st.selectbox(
+                    '気温(℃)',
+                    temp_options,
+                    index=20,
+                    key=f"temp_{model_suffix}"
+                )
+                
+                rain_options = [0, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+                select_rain = st.selectbox(
+                    '降水量(mm)',
+                    rain_options,
+                    index=0,
+                    key=f"rain_{model_suffix}"
+                )
+                
+                wind_options = list(np.arange(0, 21, 1))
+                select_wind = st.selectbox(
+                    '風速(m/s)',
+                    wind_options,
+                    index=3,
+                    key=f"wind_{model_suffix}"
                 )
             
             with col3:
-                st.metric(
-                    "水力発電（予測）",
-                    f"{result_hydro:,.0f}MW",
-                    delta=f"{(result_hydro/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    delta_color="off"
+                st.write("**その他**")
+                
+                humidity_options = list(range(0, 101, 10))
+                select_humidity = st.selectbox(
+                    '相対湿度(%)',
+                    humidity_options,
+                    index=6,
+                    key=f"humidity_{model_suffix}"
                 )
-            
-            # 全発電源を含む円グラフ
-            st.subheader("⚡ 電力供給構成（全体）")
-            
-            all_sources = {
-                '原子力': result_nuclear,
-                '火力': thermal_input,
-                '太陽光': solar_input,
-                '風力': result_wind,
-                '水力': result_hydro
-            }
-            
-            # 円グラフの作成
-            fig_pie = go.Figure(data=[
-                go.Pie(
-                    labels=list(all_sources.keys()),
-                    values=list(all_sources.values()),
-                    marker=dict(
-                        colors=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2']
-                    ),
-                    textposition='inside',
-                    textinfo='label+percent',
-                    hovertemplate='<b>%{label}</b><br>発電量: %{value:.0f}MW<br>構成比: %{percent}<extra></extra>'
+    
+                solar_options = list(np.arange(0, 1001, 50))
+                select_solar = st.selectbox(
+                    '日射量(W/m²)',
+                    solar_options,
+                    index=3,
+                    key=f"solar_{model_suffix}"
                 )
-            ])
+                
+                # 天気をエンコード（シンプルな分類）
+                weather_types = ["晴れ", "曇り", "雨", "雪"]
+                select_weather = st.selectbox(
+                    '天気',
+                    weather_types,
+                    index=0,
+                    key=f"weather_{model_suffix}"
+                )
+                weather_encoded = weather_types.index(select_weather)
             
-            fig_pie.update_layout(
-                title='火力と太陽光から予測した電力供給構成',
-                height=500,
-                font=dict(size=12)
+            # ==================================================================================
+            # Section 2-2: Prediction Button & Results
+            # ==================================================================================
+            if st.button("🔮 AI予測スタート", key=f"predict_{model_suffix}", width='stretch'):
+                # チェックボックスの状態から、対応するモデルの組み合わせ名を取得
+                combination_name = get_model_combination_name(
+                    show_nuclear,
+                    show_thermal,
+                    show_hydro,
+                    show_solar_power,
+                    show_wind
+                )
+                
+                # チェックボックスが何も選ばれていない場合はエラーを表示
+                if combination_name is None:
+                    st.error("❌ 予測する発電方式を最低1つ選択してください")
+                else:
+                    try:
+                        # location_nameをsession_stateから取得
+                        location_name = None
+                        if 'uploaded_file_name' in st.session_state:
+                            uploaded_file_name = st.session_state.uploaded_file_name
+                            if "Kumagaya" in uploaded_file_name:
+                                location_name = "kumagaya"
+                            elif "Sendai" in uploaded_file_name:
+                                location_name = "sendai"
+                        
+                        if location_name is None:
+                            location_name = "kumagaya"  # デフォルト
+                        
+                        # Combine_Modelからモデルをロード
+                        combine_model, combine_scaler, feature_names = load_combine_model(location_name, combination_name)
+                        
+                        if combine_model is not None:
+                            # 入力データを準備
+                            input_data = {
+                                '気温': select_temp,
+                                '降水量': select_rain,
+                                '風速': select_wind,
+                                '相対湿度': select_humidity,
+                                '日射量': select_solar,
+                                '月': select_month,
+                                '時間': select_hour,
+                                '曜日': select_weekday,
+                                '日': select_day,
+                                '季節': get_season(select_month)
+                            }
+                            
+                            # 予測実行
+                            predictions = predict_combine_model(combine_model, combine_scaler, input_data)
+                            
+                            st.success("✓ 予測が完了しました")
+                            
+                            # 結果を表示
+                            result_data = {}
+                            for i, name in enumerate(feature_names):
+                                result_data[name] = max(0, round(float(predictions[i]), 1))
+                            
+                            total = sum(result_data.values())
+                            
+                            # メトリクスで表示
+                            cols = st.columns(len(result_data))
+                            for idx, (name, value) in enumerate(result_data.items()):
+                                with cols[idx]:
+                                    st.metric(
+                                        f"{name}",
+                                        f"{value:,.0f}MW",
+                                        delta=f"{(value/total*100):.1f}%" if total > 0 else "0%",
+                                        delta_color="off"
+                                    )
+                            
+                            # 棒グラフで表示
+                            fig_result = go.Figure(data=[
+                                go.Bar(
+                                    x=list(result_data.keys()),
+                                    y=list(result_data.values()),
+                                    marker=dict(color=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2'][:len(result_data)]),
+                                    text=[f'{v:,.0f}MW' for v in result_data.values()],
+                                    textposition='auto',
+                                )
+                            ])
+                            
+                            fig_result.update_layout(
+                                title='電力供給構成の予測（棒グラフ）',
+                                yaxis_title='発電量(MW)',
+                                plot_bgcolor='white',
+                                height=400,
+                                showlegend=False
+                            )
+                            
+                            # 円グラフで表示
+                            fig_pie = go.Figure(data=[
+                                go.Pie(
+                                    labels=list(result_data.keys()),
+                                    values=list(result_data.values()),
+                                    marker=dict(colors=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2'][:len(result_data)]),
+                                    textposition='inside',
+                                    textinfo='label+percent'
+                                )
+                            ])
+                            
+                            fig_pie.update_layout(
+                                title='電力供給構成の予測（円グラフ）',
+                                height=400,
+                            )
+                            
+                            # 2列に配置
+                            col_chart1, col_chart2 = st.columns(2)
+                            
+                            with col_chart1:
+                                st.plotly_chart(fig_result, use_container_width=True)
+                            
+                            with col_chart2:
+                                st.plotly_chart(fig_pie, use_container_width=True)
+                            
+                            # 詳細情報
+                            st.subheader("詳細情報")
+                            
+                            info_col1, info_col2 = st.columns(2)
+                            
+                            with info_col1:
+                                st.write("**入力条件**")
+                                info_df = pd.DataFrame({
+                                    "項目": ["日時", "気温", "降水量", "風速", "相対湿度", "日射量", "天気"],
+                                    "値": [
+                                        f"{pred_date.strftime('%Y/%m/%d %H:00')}",
+                                        f"{select_temp}℃",
+                                        f"{select_rain}mm",
+                                        f"{select_wind}m/s",
+                                        f"{select_humidity}%",
+                                        f"{select_solar}W/m²",
+                                        select_weather
+                                    ]
+                                })
+                                st.dataframe(info_df, width='stretch', hide_index=True)
+                            
+                            with info_col2:
+                                st.write("**予測結果**")
+                                result_display = list(result_data.items()) + [("合計", total)]
+                                result_df = pd.DataFrame(result_display, columns=["発電方式", "発電量(MW)"])
+                                result_df["構成比"] = result_df["発電量(MW)"].apply(
+                                    lambda x: f"{(x/total*100):.1f}%" if total > 0 else "0%"
+                                )
+                                st.dataframe(result_df, width='stretch', hide_index=True)
+                        else:
+                            st.error("❌ モデルの読み込みに失敗しました")
+                    
+                    except Exception as e:
+                        st.error(f"❌ 予測中にエラーが発生しました: {str(e)}")
+        
+        # ==================================================================================
+        # Section 2-3: Predict Other Power Sources from Thermal & Solar
+        # ==================================================================================
+        with st.container(border=True):
+            st.subheader("2-3. 火力と太陽光から他の発電源を予測しよう🔌 ")
+            
+            st.info(
+                "**予測モデルの仕様**\n\n"
+                "• 入力値：火力発電（合計）+ 太陽光発電のみ\n"
+                "• 出力：原子力・風力・水力の発電量を予測\n"
+                "• 気象情報・時系列情報は使用しません\n"
+                "• 火力は個別種類（LNG・石炭・石油）ではなく合計値から計算します"
             )
             
-            st.plotly_chart(fig_pie, width='stretch')
+            # 位置情報を取得（熊谷 or 仙台）
+            location_mapping = {
+                "東京電力（Toden）": "kumagaya",
+                "東北電力（Tohoku）": "sendai"
+            }
+            location_name = location_mapping[selected_region]
             
-            # 詳細テーブル表示
-            st.subheader("📈 詳細結果")
+            col1, col2 = st.columns(2)
             
-            result_df = pd.DataFrame({
-                "発電方式": ["原子力", "火力", "太陽光", "風力", "水力", "合計"],
-                "発電量(MW)": [
-                    f"{result_nuclear:,.1f}",
-                    f"{thermal_input:,.1f}",
-                    f"{solar_input:,.1f}",
-                    f"{result_wind:,.1f}",
-                    f"{result_hydro:,.1f}",
-                    f"{total_all:,.1f}"
-                ],
-                "構成比": [
-                    f"{(result_nuclear/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    f"{(thermal_input/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    f"{(solar_input/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    f"{(result_wind/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    f"{(result_hydro/total_all*100):.1f}%" if total_all > 0 else "0%",
-                    "100%"
-                ]
-            })
+            with col1:
+                st.write("**発電量の入力**")
+                thermal_input = st.number_input(
+                    '火力発電合計(MW)',
+                    min_value=0.0,
+                    max_value=50000.0,
+                    value=10000.0,
+                    step=500.0,
+                    key=f"thermal_input_{model_suffix}",
+                    help="火力発電の合計値（LNG、石炭、石油の合計）"
+                )
+                
+                solar_input = st.number_input(
+                    '太陽光発電(MW)',
+                    min_value=0.0,
+                    max_value=10000.0,
+                    value=2000.0,
+                    step=100.0,
+                    key=f"solar_input_{model_suffix}",
+                    help="太陽光発電の実績値"
+                )
             
-            st.dataframe(result_df, width='stretch', hide_index=True)
-            
-            # 入力条件の表示
-            st.subheader("📋 入力条件")
-            
-            info_df = pd.DataFrame({
-                "項目": ["火力発電（合計）", "太陽光発電"],
-                "値": [
-                    f"{thermal_input:,.0f}MW",
-                    f"{solar_input:,.0f}MW"
+            # 予測実行ボタン
+            if st.button("🔮 発電源を予測", key=f"predict_2_2_{model_suffix}", width='stretch'):
+                # モデルをロード
+                models_dict, scaler_2_2 = load_power_prediction_models(location_name)
+                
+                # 予測実行
+                predictions_2_2 = predict_from_thermal_solar(
+                    models_dict,
+                    scaler_2_2,
+                    thermal_input,
+                    solar_input,
+                    {}  # 入力データは不使用（火力と太陽光のみで予測）
+                )
+                
+                # 結果を整理
+                result_nuclear = max(0, round(predictions_2_2.get('原子力', 0), 1))
+                result_wind = max(0, round(predictions_2_2.get('風力発電実績', 0), 1))
+                result_hydro = max(0, round(predictions_2_2.get('水力', 0), 1))
+                
+                # 火力と太陽光を含めた合計
+                total_all = thermal_input + solar_input + result_nuclear + result_wind + result_hydro
+                
+                st.success("✓ 予測が完了しました")
+                
+                # 予測結果をメトリクスで表示（予測した発電源のみ）
+                st.subheader("📊 予測結果")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "原子力発電（予測）",
+                        f"{result_nuclear:,.0f}MW",
+                        delta=f"{(result_nuclear/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        delta_color="off"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "風力発電（予測）",
+                        f"{result_wind:,.0f}MW",
+                        delta=f"{(result_wind/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        delta_color="off"
+                    )
+                
+                with col3:
+                    st.metric(
+                        "水力発電（予測）",
+                        f"{result_hydro:,.0f}MW",
+                        delta=f"{(result_hydro/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        delta_color="off"
+                    )
+                
+                # 全発電源を含む円グラフ
+                st.subheader("⚡ 電力供給構成（全体）")
+                
+                all_sources = {
+                    '原子力': result_nuclear,
+                    '火力': thermal_input,
+                    '太陽光': solar_input,
+                    '風力': result_wind,
+                    '水力': result_hydro
+                }
+                
+                # 円グラフの作成
+                fig_pie = go.Figure(data=[
+                    go.Pie(
+                        labels=list(all_sources.keys()),
+                        values=list(all_sources.values()),
+                        marker=dict(
+                            colors=['#FFD700', '#FF6B6B', '#4ECDC4', '#95E1D3', '#4A90E2']
+                        ),
+                        textposition='inside',
+                        textinfo='label+percent',
+                        hovertemplate='<b>%{label}</b><br>発電量: %{value:.0f}MW<br>構成比: %{percent}<extra></extra>'
+                    )
+                ])
+                
+                fig_pie.update_layout(
+                    title='火力と太陽光から予測した電力供給構成',
+                    height=500,
+                    font=dict(size=12)
+                )
+                
+                st.plotly_chart(fig_pie, width='stretch')
+                
+                # 詳細テーブル表示
+                st.subheader("📈 詳細結果")
+                
+                result_df = pd.DataFrame({
+                    "発電方式": ["原子力", "火力", "太陽光", "風力", "水力", "合計"],
+                    "発電量(MW)": [
+                        f"{result_nuclear:,.1f}",
+                        f"{thermal_input:,.1f}",
+                        f"{solar_input:,.1f}",
+                        f"{result_wind:,.1f}",
+                        f"{result_hydro:,.1f}",
+                        f"{total_all:,.1f}"
+                    ],
+                    "構成比": [
+                        f"{(result_nuclear/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        f"{(thermal_input/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        f"{(solar_input/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        f"{(result_wind/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        f"{(result_hydro/total_all*100):.1f}%" if total_all > 0 else "0%",
+                        "100%"
+                    ]
+                })
+                
+                st.dataframe(result_df, width='stretch', hide_index=True)
+                
+                # 入力条件の表示
+                st.subheader("📋 入力条件")
+                
+                info_df = pd.DataFrame({
+                    "項目": ["火力発電（合計）", "太陽光発電"],
+                    "値": [
+                        f"{thermal_input:,.0f}MW",
+                        f"{solar_input:,.0f}MW"
+                    ]
+                })
+                
+                st.dataframe(info_df, width='stretch', hide_index=True)
+        
+        # ==================================================================================
+    
+        # ==================================================================================
+        # Section 2-4: Predict Other Power Sources from a Single Power Source
+        # ※ 2-4専用処理。既存の1-1～2-3には変更を加えない
+        # ==================================================================================
+        with st.container(border=True):
+            st.subheader("2-4. 1つの発電から他の発電を予測してみよう🔎")
+    
+            # 2-4専用設定（他セクションの変数・処理に影響させない）
+            unitp_power_config = {
+                "thermal": {"display": "火力", "columns": ["火力合計", "火力_合計", "火力"], "file": "thermal"},
+                "hydro": {"display": "水力", "columns": ["水力"], "file": "hydro"},
+                "nuclear": {"display": "原子力", "columns": ["原子力"], "file": "nuclear"},
+                "wind": {"display": "風力", "columns": ["風力発電実績", "風力"], "file": "wind"},
+                "solar": {"display": "太陽光", "columns": ["太陽光発電実績", "太陽光"], "file": "solar"},
+            }
+            unitp_default_targets = {
+                "thermal": ["水力", "原子力", "風力発電実績", "太陽光発電実績"],
+                "hydro": ["火力合計", "原子力", "風力発電実績", "太陽光発電実績"],
+                "nuclear": ["火力合計", "水力", "風力発電実績", "太陽光発電実績"],
+                "wind": ["火力合計", "水力", "原子力", "太陽光発電実績"],
+                "solar": ["火力合計", "水力", "原子力", "風力発電実績"],
+            }
+            unitp_display_names = {
+                "火力合計": "火力", "火力_合計": "火力", "火力": "火力",
+                "水力": "水力", "原子力": "原子力",
+                "風力発電実績": "風力", "風力": "風力",
+                "太陽光発電実績": "太陽光", "太陽光": "太陽光",
+            }
+            unitp_colors = {
+                "火力": "#FF6B6B", "水力": "#4A90E2", "原子力": "#FFD700",
+                "風力": "#95E1D3", "太陽光": "#4ECDC4",
+            }
+    
+            # 2-4で使用する実績データは、必ず1-1でLoadしたDataFrameを使用する
+            # 2-4側で別のCSVを検索・読み込みすることはしない。
+            # これにより、1-1で読み込んだ各発電の実績値をそのままMin/Maxの範囲に使用する。
+            unitp_df = df
+    
+            if unitp_df is None:
+                st.warning(
+                    "⚠️ 2-4の発電量入力範囲を取得するには、先に1-1でCSVファイルをLoadしてください。"
+                )
+    
+            def unitp_get_power_range(power_key):
+                config = unitp_power_config[power_key]
+                if unitp_df is None:
+                    return None
+                column = next((c for c in config["columns"] if c in unitp_df.columns), None)
+                if column is None:
+                    return None
+                values = pd.to_numeric(unitp_df[column], errors="coerce").replace(
+                    [np.inf, -np.inf], np.nan
+                ).dropna()
+                if values.empty:
+                    return None
+                minimum = max(0.0, float(values.min()))
+                maximum = max(minimum, float(values.max()))
+                median = float(np.clip(values.median(), minimum, maximum))
+                width = maximum - minimum
+                step = (
+                    100.0 if width >= 10000
+                    else 10.0 if width >= 1000
+                    else 1.0 if width >= 100
+                    else 0.1 if width >= 10
+                    else 0.01
+                )
+                return {
+                    "column": column,
+                    "min": minimum,
+                    "max": maximum,
+                    "median": median,
+                    "mean": float(values.mean()),
+                    "step": step,
+                }
+    
+            def unitp_find_file(names):
+                unitp_base_dir = Path(__file__).parent
+                search_dirs = [
+                    unitp_base_dir / "Output" / "UnitP_Model",
+                    unitp_base_dir / "UnitP_Model",
+                    unitp_base_dir / "UP_Model",
+                    unitp_base_dir / "models" / "UnitP_Model",
                 ]
             })
             
