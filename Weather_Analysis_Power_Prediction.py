@@ -697,6 +697,9 @@ def init_session_state():
 # ==================================================================================
 
 def main():
+    # ここで初期化
+    info_df = pd.DataFrame()
+
     ### Page Configuration ###
     st.set_page_config(
         page_title="天気・電力データ分析ツール",
