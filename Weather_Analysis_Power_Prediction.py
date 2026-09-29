@@ -1759,14 +1759,23 @@ def main():
     
             def unitp_find_file(names):
                 unitp_base_dir = Path(__file__).parent
+
                 search_dirs = [
                     unitp_base_dir / "Output" / "UnitP_Model",
                     unitp_base_dir / "UnitP_Model",
                     unitp_base_dir / "UP_Model",
                     unitp_base_dir / "models" / "UnitP_Model",
                 ]
+
+                for search_dir in search_dirs:
+                    for name in names:
+                        path = search_dir / name
+                        if path.is_file():
+                            return path
+
+                return None
             
-            st.dataframe(info_df, width='stretch', hide_index=True)
+            #st.dataframe(info_df, width='stretch', hide_index=True)
     
     # ==================================================================================
     # Footer
