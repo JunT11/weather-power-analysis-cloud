@@ -1775,7 +1775,7 @@ def main():
 
                 return None
             
-            #st.dataframe(info_df, width='stretch', hide_index=True)
+            st.dataframe(info_df, width='stretch', hide_index=True)
     
     # ==================================================================================
     # Footer
