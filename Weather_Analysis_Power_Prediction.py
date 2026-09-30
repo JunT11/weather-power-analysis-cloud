@@ -1682,394 +1682,395 @@ def main():
         
         # ==================================================================================
     
-    # ==================================================================================
-    # Section 2-4: Predict Other Power Sources from a Single Power Source
-    # ※ 2-4専用処理。既存の1-1～2-3には変更を加えない
-    # ==================================================================================
-    with st.container(border=True):
-        st.subheader("2-4. 1つの発電から他の発電を予測してみよう🔎")
-
-        st.info(
-            "**予測モデルの仕様**\n\n"
-            "• 1つの発電源の実績値を入力\n"
-            "• UP_Model の対応モデルから他の発電源を予測\n"
-            "• 入力値のMin/Maxは1-1でLoadしたCSVの実績値から取得\n"
-            "• 2-4では別のCSVを読み込みません"
-        )
-
-        # 2-4専用設定
-        unitp_power_config = {
-            "thermal": {
-                "display": "火力",
-                "columns": ["火力合計", "火力_合計", "火力"],
-                "file": "火力",
-            },
-            "hydro": {
-                "display": "水力",
-                "columns": ["水力"],
-                "file": "水力",
-            },
-            "nuclear": {
-                "display": "原子力",
-                "columns": ["原子力"],
-                "file": "原子力",
-            },
-            "wind": {
-                "display": "風力",
-                "columns": ["風力発電実績", "風力"],
-                "file": "風力",
-            },
-            "solar": {
-                "display": "太陽光",
-                "columns": ["太陽光発電実績", "太陽光"],
-                "file": "太陽光",
-            },
-        }
-
-        unitp_default_targets = {
-            "thermal": ["水力", "原子力", "風力発電実績", "太陽光発電実績"],
-            "hydro": ["火力合計", "原子力", "風力発電実績", "太陽光発電実績"],
-            "nuclear": ["火力合計", "水力", "風力発電実績", "太陽光発電実績"],
-            "wind": ["火力合計", "水力", "原子力", "太陽光発電実績"],
-            "solar": ["火力合計", "水力", "原子力", "風力発電実績"],
-        }
-
-        unitp_display_names = {
-            "火力合計": "火力",
-            "火力_合計": "火力",
-            "火力": "火力",
-            "水力": "水力",
-            "原子力": "原子力",
-            "風力発電実績": "風力",
-            "風力": "風力",
-            "太陽光発電実績": "太陽光",
-            "太陽光": "太陽光",
-        }
-
-        unitp_colors = {
-            "火力": "#FF6B6B",
-            "水力": "#4A90E2",
-            "原子力": "#FFD700",
-            "風力": "#95E1D3",
-            "太陽光": "#4ECDC4",
-        }
-
-        # 1-1で読み込んだDataFrameだけを使用
-        unitp_df = df
-
-        def unitp_get_power_range(power_key):
-            config = unitp_power_config[power_key]
-
+        # ==================================================================================
+        # Section 2-4: Predict Other Power Sources from a Single Power Source
+        # ※ 2-4専用処理。既存の1-1～2-3には変更を加えない
+        # ==================================================================================
+        with st.container(border=True):
+            st.subheader("2-4. 1つの発電から他の発電を予測してみよう🔎")
+    
+            # 2-4専用設定（他セクションの変数・処理に影響させない）
+            unitp_power_config = {
+                "thermal": {"display": "火力", "columns": ["火力合計", "火力_合計", "火力"], "file": "thermal"},
+                "hydro": {"display": "水力", "columns": ["水力"], "file": "hydro"},
+                "nuclear": {"display": "原子力", "columns": ["原子力"], "file": "nuclear"},
+                "wind": {"display": "風力", "columns": ["風力発電実績", "風力"], "file": "wind"},
+                "solar": {"display": "太陽光", "columns": ["太陽光発電実績", "太陽光"], "file": "solar"},
+            }
+            unitp_default_targets = {
+                "thermal": ["水力", "原子力", "風力発電実績", "太陽光発電実績"],
+                "hydro": ["火力合計", "原子力", "風力発電実績", "太陽光発電実績"],
+                "nuclear": ["火力合計", "水力", "風力発電実績", "太陽光発電実績"],
+                "wind": ["火力合計", "水力", "原子力", "太陽光発電実績"],
+                "solar": ["火力合計", "水力", "原子力", "風力発電実績"],
+            }
+            unitp_display_names = {
+                "火力合計": "火力", "火力_合計": "火力", "火力": "火力",
+                "水力": "水力", "原子力": "原子力",
+                "風力発電実績": "風力", "風力": "風力",
+                "太陽光発電実績": "太陽光", "太陽光": "太陽光",
+            }
+            unitp_colors = {
+                "火力": "#FF6B6B", "水力": "#4A90E2", "原子力": "#FFD700",
+                "風力": "#95E1D3", "太陽光": "#4ECDC4",
+            }
+    
+            # 2-4で使用する実績データは、必ず1-1でLoadしたDataFrameを使用する
+            # 2-4側で別のCSVを検索・読み込みすることはしない。
+            # これにより、1-1で読み込んだ各発電の実績値をそのままMin/Maxの範囲に使用する。
+            unitp_df = df
+    
             if unitp_df is None:
-                return None
-
-            column = next(
-                (c for c in config["columns"] if c in unitp_df.columns),
-                None,
-            )
-            if column is None:
-                return None
-
-            values = (
-                pd.to_numeric(unitp_df[column], errors="coerce")
-                .replace([np.inf, -np.inf], np.nan)
-                .dropna()
-            )
-            if values.empty:
-                return None
-
-            minimum = max(0.0, float(values.min()))
-            maximum = max(minimum, float(values.max()))
-            median = float(np.clip(values.median(), minimum, maximum))
-            width = maximum - minimum
-
-            step = (
-                100.0 if width >= 10000
-                else 10.0 if width >= 1000
-                else 1.0 if width >= 100
-                else 0.1 if width >= 10
-                else 0.01
-            )
-
-            return {
-                "column": column,
-                "min": minimum,
-                "max": maximum,
-                "median": median,
-                "mean": float(values.mean()),
-                "step": step,
-            }
-
-        def unitp_find_file(names):
-            unitp_base_dir = Path(__file__).resolve().parent
-
-            search_dirs = [
-                unitp_base_dir / "UP_Model",
-                unitp_base_dir / "Output" / "UnitP_Model",
-                unitp_base_dir / "UnitP_Model",
-                unitp_base_dir / "models" / "UnitP_Model",
-            ]
-
-            for search_dir in search_dirs:
-                for name in names:
-                    path = search_dir / name
-                    if path.is_file():
-                        return path
-
-            return None
-
-        def unitp_load_metadata(location_name):
-            metadata_file = unitp_find_file(
-                [f"UnitP_Model_metadata_{location_name}.json"]
-            )
-            if metadata_file is None:
-                return {}
-            try:
-                with open(metadata_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return data if isinstance(data, dict) else {}
-            except Exception:
-                return {}
-
-        def unitp_predict(location_name, source_key, input_value):
-            source_file = unitp_power_config[source_key]["file"]
-
-            model_file = unitp_find_file(
-                [f"up_model_{location_name}_{source_file}.pkl"]
-            )
-            if model_file is None:
-                raise FileNotFoundError(
-                    f"UP_Modelのモデルが見つかりません: "
-                    f"up_model_{location_name}_{source_file}.pkl"
+                st.warning(
+                    "⚠️ 2-4の発電量入力範囲を取得するには、先に1-1でCSVファイルをLoadしてください。"
                 )
-
-            model = joblib.load(model_file)
-            X = np.asarray([[float(input_value)]], dtype=float)
-
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message="X does not have valid feature names",
-                    )
-                    prediction = model.predict(X)
-            except Exception:
-                # DataFrame入力を要求するモデルにも対応
-                prediction = model.predict(
-                    pd.DataFrame(
-                        [[float(input_value)]],
-                        columns=[source_file],
-                    )
+    
+            def unitp_get_power_range(power_key):
+                config = unitp_power_config[power_key]
+                if unitp_df is None:
+                    return None
+                column = next((c for c in config["columns"] if c in unitp_df.columns), None)
+                if column is None:
+                    return None
+                values = pd.to_numeric(unitp_df[column], errors="coerce").replace(
+                    [np.inf, -np.inf], np.nan
+                ).dropna()
+                if values.empty:
+                    return None
+                minimum = max(0.0, float(values.min()))
+                maximum = max(minimum, float(values.max()))
+                median = float(np.clip(values.median(), minimum, maximum))
+                width = maximum - minimum
+                step = (
+                    100.0 if width >= 10000
+                    else 10.0 if width >= 1000
+                    else 1.0 if width >= 100
+                    else 0.1 if width >= 10
+                    else 0.01
                 )
-
-            # metadataから出力名を取得できる場合は利用
-            metadata = unitp_load_metadata(location_name)
-            metadata_targets = None
-
-            candidate_keys = [
-                source_file,
-                source_key,
-                "targets",
-                "target_columns",
-                "output_columns",
-                "outputs",
-            ]
-            for key in candidate_keys:
-                value = metadata.get(key)
-                if isinstance(value, dict):
-                    for subkey in ("targets", "target_columns", "output_columns", "outputs"):
-                        if isinstance(value.get(subkey), list):
-                            metadata_targets = value[subkey]
+                return {
+                    "column": column,
+                    "min": minimum,
+                    "max": maximum,
+                    "median": median,
+                    "mean": float(values.mean()),
+                    "step": step,
+                }
+    
+            def unitp_find_file(names):
+                unitp_base_dir = Path(__file__).parent
+                search_dirs = [
+                    unitp_base_dir / "Output" / "UnitP_Model",
+                    unitp_base_dir / "UnitP_Model",
+                    unitp_base_dir / "UP_Model",
+                    unitp_base_dir / "models" / "UnitP_Model",
+                ]
+                for directory in search_dirs:
+                    for name in names:
+                        path = directory / name
+                        if path.exists():
+                            return path
+                return None
+    
+            def unitp_load_model(location, power_key):
+                cfg = unitp_power_config[power_key]
+                key, jp = cfg["file"], cfg["display"]
+                model_names = [
+                    f"UnitP_Model_{location}_{key}.pkl",
+                    f"UnitP_Model_{key}_{location}.pkl",
+                    f"up_model_{location}_{jp}.pkl",
+                    f"UnitP_Model_{key}.pkl",
+                ]
+                model_path = unitp_find_file(model_names)
+                if model_path is None:
+                    return None, None, None, "モデルが見つかりません: " + ", ".join(model_names)
+    
+                try:
+                    model = joblib.load(model_path)
+                except Exception as e:
+                    return None, None, model_path, str(e)
+    
+                meta_names = [
+                    f"UnitP_Model_{location}_{key}_features.json",
+                    f"UnitP_Model_{key}_{location}_features.json",
+                    f"UnitP_Model_{key}_features.json",
+                ]
+                meta_path = unitp_find_file(meta_names)
+                metadata = None
+                if meta_path:
+                    with open(meta_path, encoding="utf-8") as f:
+                        metadata = json.load(f)
+    
+                if metadata is None:
+                    combined = unitp_find_file([
+                        f"UnitP_Model_metadata_{location}.json",
+                        "UnitP_Model_metadata.json"
+                    ])
+                    if combined:
+                        with open(combined, encoding="utf-8") as f:
+                            content = json.load(f)
+                            metadata = content.get(key, content.get(power_key))
+    
+                return model, metadata, model_path, None
+    
+            def unitp_make_input(model, metadata, location, power_key, power_value,
+                                 date_value, hour, temperature, rainfall, wind_speed,
+                                 humidity, solar_radiation, weather_encoded):
+                year, month, day = date_value.year, date_value.month, date_value.day
+                dow, doy = date_value.weekday(), date_value.timetuple().tm_yday
+                values = {
+                    "日時_年": year, "日時_月": month, "日時_日": day, "日時_時": hour,
+                    "日時_曜日": dow, "日時_年間通算日": doy,
+                    "日時_月_sin": np.sin(2*np.pi*month/12),
+                    "日時_月_cos": np.cos(2*np.pi*month/12),
+                    "日時_時_sin": np.sin(2*np.pi*hour/24),
+                    "日時_時_cos": np.cos(2*np.pi*hour/24),
+                    "日時_曜日_sin": np.sin(2*np.pi*dow/7),
+                    "日時_曜日_cos": np.cos(2*np.pi*dow/7),
+                    "日時_年間通算日_sin": np.sin(2*np.pi*doy/365.25),
+                    "日時_年間通算日_cos": np.cos(2*np.pi*doy/365.25),
+                    "気温": temperature, "平均気温": temperature, "temperature": temperature, "temp": temperature,
+                    "降水量": rainfall, "降水": rainfall, "rainfall": rainfall, "precipitation": rainfall,
+                    "風速": wind_speed, "平均風速": wind_speed, "wind_speed": wind_speed, "windspeed": wind_speed,
+                    "相対湿度": humidity, "湿度": humidity, "平均湿度": humidity, "humidity": humidity,
+                    "日射量": solar_radiation, "全天日射量": solar_radiation, "solar_radiation": solar_radiation,
+                    "天気": weather_encoded, "天気_encoded": weather_encoded, "weather_encoded": weather_encoded,
+                    "地域_東京電力": int(location == "kumagaya"),
+                    "地域_東北電力": int(location == "sendai"),
+                }
+                values.update({c: power_value for c in unitp_power_config[power_key]["columns"]})
+    
+                features = metadata.get("feature_columns", []) if isinstance(metadata, dict) else []
+                if not features and hasattr(model, "feature_names_in_"):
+                    features = list(model.feature_names_in_)
+                if not features and hasattr(model, "named_steps"):
+                    for step_model in model.named_steps.values():
+                        if hasattr(step_model, "feature_names_in_"):
+                            features = list(step_model.feature_names_in_)
                             break
-                elif isinstance(value, list):
-                    metadata_targets = value
-
-                if metadata_targets:
-                    break
-
-            if metadata_targets is None:
-                metadata_targets = unitp_default_targets[source_key]
-
-            raw = prediction
-
-            if isinstance(raw, dict):
-                result = {
-                    unitp_display_names.get(str(k), str(k)): max(0.0, float(v))
-                    for k, v in raw.items()
-                }
-                return result
-
-            if isinstance(raw, (list, tuple, np.ndarray)):
-                arr = np.asarray(raw, dtype=float).reshape(-1)
-            else:
-                arr = np.asarray([raw], dtype=float).reshape(-1)
-
-            if len(arr) == 1 and len(metadata_targets) > 1:
-                # 1出力モデルの場合は、その1つだけを表示
-                targets = metadata_targets[:1]
-            else:
-                targets = metadata_targets[:len(arr)]
-
-            return {
-                unitp_display_names.get(str(name), str(name)): max(0.0, float(value))
-                for name, value in zip(targets, arr)
-            }
-
-        # ----------------------------------------------------------------------
-        # 2-4 UI
-        # ----------------------------------------------------------------------
-        power_labels = {
-            key: value["display"] for key, value in unitp_power_config.items()
-        }
-
-        col_input, col_target = st.columns(2)
-
-        with col_input:
-            st.write("**① 入力する発電源**")
-            unitp_source = st.selectbox(
-                "発電源を選択",
-                list(unitp_power_config.keys()),
-                format_func=lambda x: power_labels[x],
-                key=f"unitp_source_{model_suffix}",
-            )
-
-        with col_target:
-            st.write("**② 予測する発電源**")
-            default_target_labels = [
-                unitp_display_names.get(x, x)
-                for x in unitp_default_targets[unitp_source]
-            ]
-            unitp_targets = st.multiselect(
-                "予測対象（複数選択可）",
-                default_target_labels,
-                default=default_target_labels,
-                key=f"unitp_targets_{model_suffix}",
-            )
-
-        power_range = unitp_get_power_range(unitp_source)
-
-        if unitp_df is None:
-            st.warning(
-                "⚠️ 2-4を使用するには、先に1-1でCSVファイルをLoadしてください。"
-            )
-            unitp_input_value = 0.0
-            unitp_input_disabled = True
-        elif power_range is None:
-            st.warning(
-                f"⚠️ 「{power_labels[unitp_source]}」の実績列が1-1のCSVに見つかりません。"
-            )
-            unitp_input_value = 0.0
-            unitp_input_disabled = True
-        else:
-            st.caption(
-                f"実績データ範囲：{power_range['min']:,.2f} ～ "
-                f"{power_range['max']:,.2f} MW "
-                f"（使用列：{power_range['column']}）"
-            )
-
-            unitp_input_value = st.number_input(
-                f"{power_labels[unitp_source]}発電量 (MW)",
-                min_value=float(power_range["min"]),
-                max_value=float(power_range["max"]),
-                value=float(power_range["median"]),
-                step=float(power_range["step"]),
-                key=f"unitp_input_{model_suffix}_{unitp_source}",
-            )
-            unitp_input_disabled = False
-
-        if not unitp_targets:
-            st.info("予測対象を1つ以上選択してください。")
-
-        if st.button(
-            "🔮 1つの発電源から予測",
-            key=f"unitp_predict_{model_suffix}",
-            width="stretch",
-            disabled=unitp_input_disabled or not unitp_targets,
-        ):
-            try:
-                location_name_2_4 = (
-                    "kumagaya"
-                    if selected_region == "東京電力（Toden）"
-                    else "sendai"
-                )
-
-                predictions = unitp_predict(
-                    location_name_2_4,
-                    unitp_source,
-                    unitp_input_value,
-                )
-
-                # 選択された対象だけに絞る
-                filtered_predictions = {
-                    name: value
-                    for name, value in predictions.items()
-                    if name in unitp_targets
-                }
-
-                if not filtered_predictions:
-                    raise ValueError(
-                        "モデルから予測結果を取得できませんでした。"
-                        "UP_Modelのモデル出力とmetadataの対応を確認してください。"
-                    )
-
-                st.success("✓ 予測が完了しました")
-
-                result_cols = st.columns(len(filtered_predictions))
-                for col, (name, value) in zip(
-                    result_cols, filtered_predictions.items()
-                ):
-                    with col:
-                        st.metric(name, f"{value:,.0f} MW")
-
-                result_df_2_4 = pd.DataFrame(
-                    {
-                        "発電方式": list(filtered_predictions.keys()),
-                        "予測発電量(MW)": [
-                            round(v, 1) for v in filtered_predictions.values()
-                        ],
-                    }
-                )
-
-                st.subheader("📊 予測結果")
-                st.dataframe(
-                    result_df_2_4,
-                    width="stretch",
-                    hide_index=True,
-                )
-
-                # 入力値 + 予測結果の構成を表示
-                all_sources_2_4 = {
-                    power_labels[unitp_source]: float(unitp_input_value),
-                    **filtered_predictions,
-                }
-
-                fig_2_4 = go.Figure(
-                    data=[
-                        go.Pie(
-                            labels=list(all_sources_2_4.keys()),
-                            values=list(all_sources_2_4.values()),
-                            textposition="inside",
-                            textinfo="label+percent",
-                        )
+                if not features:
+                    features = [
+                        unitp_power_config[power_key]["columns"][0], "日時_年", "日時_月", "日時_日", "日時_時",
+                        "日時_曜日", "日時_年間通算日", "日時_月_sin", "日時_月_cos",
+                        "日時_時_sin", "日時_時_cos", "日時_曜日_sin", "日時_曜日_cos",
+                        "日時_年間通算日_sin", "日時_年間通算日_cos",
+                        "気温", "降水量", "風速", "相対湿度", "日射量", "天気"
                     ]
+                unknown = [f for f in features if f not in values]
+                return pd.DataFrame(
+                    [{f: values.get(f, np.nan) for f in features}],
+                    columns=features
+                ), unknown
+    
+            def unitp_predict(model, metadata, location, power_key, power_value,
+                              date_value, hour, temperature, rainfall, wind_speed,
+                              humidity, solar_radiation, weather_encoded):
+                try:
+                    x, unknown = unitp_make_input(
+                        model, metadata, location, power_key, power_value, date_value, hour,
+                        temperature, rainfall, wind_speed, humidity, solar_radiation, weather_encoded
+                    )
+                    pred = np.asarray(model.predict(x))
+                    values = pred[0] if pred.ndim == 2 else pred
+                    targets = (
+                        metadata.get("target_columns", unitp_default_targets[power_key])
+                        if isinstance(metadata, dict)
+                        else unitp_default_targets[power_key]
+                    )
+                    if len(values) != len(targets):
+                        return {
+                            "success": False,
+                            "error": f"モデル出力数({len(values)})と目的変数数({len(targets)})が一致しません"
+                        }
+                    result = {
+                        name: max(0.0, float(value)) if np.isfinite(value) else 0.0
+                        for name, value in zip(targets, values)
+                    }
+                    return {"success": True, "predictions": result, "input": x, "unknown": unknown}
+                except Exception as e:
+                    return {"success": False, "error": str(e)}
+    
+            def unitp_power_charts(data):
+                colors = [unitp_colors.get(k, "#888888") for k in data]
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig = go.Figure(go.Bar(
+                        x=list(data), y=list(data.values()), marker_color=colors,
+                        text=[f"{v:,.0f} MW" for v in data.values()], textposition="outside"
+                    ))
+                    fig.update_layout(
+                        title="発電量の比較",
+                        yaxis_title="発電量（MW）",
+                        height=420,
+                        plot_bgcolor="white"
+                    )
+                    st.plotly_chart(fig, width="stretch")
+                with c2:
+                    fig = go.Figure(go.Pie(
+                        labels=list(data), values=list(data.values()),
+                        marker_colors=colors,
+                        textposition="inside", textinfo="label+percent"
+                    ))
+                    fig.update_layout(title="予測した電力供給構成", height=420)
+                    st.plotly_chart(fig, width="stretch")
+    
+            st.info(
+                f"読み込みファイルにより "
+                f"{'熊谷（東京電力）' if location_name == 'kumagaya' else '仙台（東北電力）'} のモデルを使用します。\n\n"
+                "発電量の入力範囲は、選択した発電方式のCSV実績最小値から最大値です。"
+            )
+    
+            labels = {
+                "🔥 火力": "thermal",
+                "💧 水力": "hydro",
+                "⚛️ 原子力": "nuclear",
+                "💨 風力": "wind",
+                "☀️ 太陽光": "solar"
+            }
+            left, right = st.columns([1, 2])
+            selected_label = left.radio(
+                "入力する発電方式",
+                labels.keys(),
+                key=f"unitp_type_{location_name}"
+            )
+            power_key = labels[selected_label]
+            display = unitp_power_config[power_key]["display"]
+            range_info = unitp_get_power_range(power_key)
+    
+            if range_info is None:
+                st.error(f"{display}に対応する有効なCSV列がありません。")
+            else:
+                lo, hi = range_info["min"], range_info["max"]
+                med, step = range_info["median"], range_info["step"]
+    
+                with right:
+                    if lo == hi:
+                        st.warning(f"実績値は {lo:,.1f} MW のみです。")
+                        power_value = lo
+                    else:
+                        power_value = st.slider(
+                            f"{display}発電量（MW）",
+                            float(lo), float(hi), float(med), float(step),
+                            key=f"unitp_value_{location_name}_{power_key}"
+                        )
+    
+                metrics = st.columns(4)
+                metrics[0].metric("実績Min", f"{lo:,.1f} MW")
+                metrics[1].metric("実績Max", f"{hi:,.1f} MW")
+                metrics[2].metric("中央値", f"{med:,.1f} MW")
+                metrics[3].metric("入力値", f"{power_value:,.1f} MW")
+                st.caption(f"参照CSV列: {range_info['column']}")
+    
+                d1, d2 = st.columns(2)
+                unit_date = d1.date_input(
+                    "予測日", datetime.date(2026, 10, 15),
+                    key=f"unitp_date_{location_name}"
                 )
-                fig_2_4.update_layout(
-                    title="入力した発電源と予測結果の構成",
-                    height=450,
+                unit_hour = d2.selectbox(
+                    "時間", range(24), index=12,
+                    format_func=lambda x: f"{x:02d}:00",
+                    key=f"unitp_hour_{location_name}"
                 )
-                st.plotly_chart(fig_2_4, width="stretch")
-
-            except FileNotFoundError as e:
-                st.error(f"❌ {e}")
-                st.info(
-                    "UP_Modelフォルダに、地域別のup_model_*.pklを配置してください。"
+    
+                w1, w2, w3 = st.columns(3)
+                temperature = w1.number_input(
+                    "気温（℃）", -20.0, 50.0, 15.0, 0.5,
+                    key=f"u_temp_{location_name}"
                 )
-            except Exception as e:
-                st.error(
-                    f"❌ 2-4の予測中にエラーが発生しました: "
-                    f"{type(e).__name__}: {e}"
+                rainfall = w1.number_input(
+                    "降水量（mm）", 0.0, 500.0, 0.0, 0.5,
+                    key=f"u_rain_{location_name}"
                 )
-
+                wind_speed = w2.number_input(
+                    "風速（m/s）", 0.0, 60.0, 3.0, 0.5,
+                    key=f"u_wind_{location_name}"
+                )
+                humidity = w2.number_input(
+                    "相対湿度（%）", 0.0, 100.0, 60.0, 1.0,
+                    key=f"u_hum_{location_name}"
+                )
+                solar_radiation = w3.number_input(
+                    "日射量", 0.0, 1500.0, 150.0, 10.0,
+                    key=f"u_solar_{location_name}"
+                )
+                weather_name = w3.selectbox(
+                    "天気", ["晴れ", "曇り", "雨", "雪"],
+                    key=f"u_weather_{location_name}"
+                )
+                weather_code = {"晴れ": 0, "曇り": 1, "雨": 2, "雪": 3}[weather_name]
+    
+                if st.button(
+                    "🔮 他の4種類の発電量を予測",
+                    width="stretch",
+                    key=f"unitp_predict_{location_name}_{power_key}"
+                ):
+                    model, metadata, path, error = unitp_load_model(location_name, power_key)
+    
+                    if error:
+                        st.error(error)
+                        st.code(
+                            "Output/UnitP_Model/UnitP_Model_kumagaya_thermal.pkl\n"
+                            "Output/UnitP_Model/UnitP_Model_sendai_thermal.pkl"
+                        )
+                    else:
+                        result = unitp_predict(
+                            model, metadata, location_name, power_key, power_value,
+                            unit_date, unit_hour, temperature, rainfall, wind_speed,
+                            humidity, solar_radiation, weather_code
+                        )
+                        if not result["success"]:
+                            st.error(f"予測エラー: {result['error']}")
+                        else:
+                            location_display_24 = (
+                                "熊谷（東京電力）"
+                                if location_name == "kumagaya"
+                                else "仙台（東北電力）"
+                            )
+                            st.success(
+                                f"✓ {location_display_24}モデルで予測しました。"
+                                f" 使用モデル: {path.name}"
+                            )
+                            display_pred = {
+                                unitp_display_names.get(k, k): v
+                                for k, v in result["predictions"].items()
+                            }
+                            cols = st.columns(4)
+                            for i, (name, value) in enumerate(display_pred.items()):
+                                cols[i].metric(
+                                    f"{name}（予測）",
+                                    f"{value:,.1f} MW"
+                                )
+    
+                            all_sources = {display: float(power_value), **display_pred}
+                            unitp_power_charts(all_sources)
+    
+                            total = sum(all_sources.values())
+                            rows = [
+                                {
+                                    "発電方式": k,
+                                    "区分": "入力値" if k == display else "AI予測値",
+                                    "発電量（MW）": round(v, 1),
+                                    "構成比": f"{v/total*100:.1f}%" if total else "0%"
+                                }
+                                for k, v in all_sources.items()
+                            ]
+                            rows.append({
+                                "発電方式": "合計",
+                                "区分": "",
+                                "発電量（MW）": round(total, 1),
+                                "構成比": "100.0%"
+                            })
+                            st.subheader("📋 詳細結果")
+                            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    
+                            with st.expander("モデル入力情報"):
+                                st.dataframe(result["input"], width="stretch", hide_index=True)
+                                if result["unknown"]:
+                                    st.warning(
+                                        "値を特定できずNaNにした特徴量: "
+                                        + ", ".join(result["unknown"])
+                                    )
+    
     # ==================================================================================
     # Footer
     # ==================================================================================
