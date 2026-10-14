@@ -1364,6 +1364,15 @@ def main():
             # ==================================================================================
             # Section 2-2: Prediction Button & Results
             # ==================================================================================
+            # チェック数不足時のポップアップ
+            @st.dialog("⚠️ 選択数が不足しています")
+            def show_selection_warning():
+                st.warning(
+                    "予測する発電方式を2つ以上選択してください。"
+                )
+                if st.button("閉じる"):
+                    st.rerun()
+            
             if st.button("🔮 AI予測スタート", key=f"predict_{model_suffix}", width='stretch'):
                 # チェックボックスの状態から、対応するモデルの組み合わせ名を取得
                 combination_name = get_model_combination_name(
@@ -1375,8 +1384,22 @@ def main():
                 )
                 
                 # チェックボックスが何も選ばれていない場合はエラーを表示
-                if combination_name is None:
-                    st.error("❌ 予測する発電方式を最低1つ選択してください")
+                # 発電方式の選択数を確認
+                selected_count = sum([
+                    show_thermal,
+                    show_solar_power,
+                    show_wind,
+                    show_hydro,
+                    show_nuclear
+                ])
+
+                # 2つ未満ならポップアップを表示
+                if selected_count < 2:
+                    show_selection_warning()
+
+                elif combination_name is None:
+                    show_selection_warning()
+
                 else:
                     try:
                         # location_nameをsession_stateから取得
