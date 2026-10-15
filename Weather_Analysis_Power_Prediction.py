@@ -309,51 +309,33 @@ def get_season(month):
         return 3  # 秋
 
 
-def load_weather_prediction_models(location_name):
-    """
-    日時から気象情報を予測するモデルをロード
-    
-    Parameters:
-    -----------
-    location_name : str
-        地域名（kumagaya または sendai）
-    
-    Returns:
-    --------
-    models_dict : dict
-        各気象要素のモデル辞書（気温、相対湿度、降水量、風速、日射量、天気）
-    scaler : StandardScaler
-        特徴量の標準化用スケーラー
-    """
-    work_dir = Path(__file__).parent / "Weather_Model"
-    
+@st.cache_resource(show_spinner=False)
+def _load_weather_prediction_models_cached(location_name):
+    """気象予測モデルをロードして共有キャッシュする。失敗時は例外を送出する。"""
+    work_dir = Path(__file__).resolve().parent / "Weather_Model"
+    weather_elements = ["気温", "相対湿度", "降水量", "風速", "日射量", "天気"]
+
     models_dict = {}
-    
-    # 各気象要素のモデルをロード
-    weather_elements = ['気温', '相対湿度', '降水量', '風速', '日射量', '天気']
     for element in weather_elements:
         model_file = work_dir / f"model_{location_name}_{element}.pkl"
-        try:
-            models_dict[element] = joblib.load(model_file)
-        except FileNotFoundError:
-            st.error(f"❌ モデルファイルが見つかりません: {model_file}")
-            models_dict[element] = None
-        except Exception as e:
-            st.error(f"❌ モデルのロードに失敗しました（{element}）: {str(e)}")
-            models_dict[element] = None
-    
-    # スケーラーをロード
+        models_dict[element] = joblib.load(model_file)
+
     scaler_file = work_dir / f"scaler_{location_name}.pkl"
-    try:
-        scaler = joblib.load(scaler_file)
-    except FileNotFoundError:
-        st.error(f"❌ スケーラーファイルが見つかりません: {scaler_file}")
-        scaler = None
-    except Exception as e:
-        st.error(f"❌ スケーラーのロードに失敗しました: {str(e)}")
-        scaler = None
-    
+    scaler = joblib.load(scaler_file)
     return models_dict, scaler
+
+
+def load_weather_prediction_models(location_name):
+    """日時から気象情報を予測するモデルをロードする。"""
+    try:
+        return _load_weather_prediction_models_cached(location_name)
+    except FileNotFoundError as e:
+        st.error(f"❌ 気象予測モデルのファイルが見つかりません: {e.filename or str(e)}")
+    except Exception as e:
+        st.error(f"❌ 気象予測モデルのロードに失敗しました: {e}")
+
+    # エラーをキャッシュせず、次の操作で再試行できるようにする
+    return {name: None for name in ["気温", "相対湿度", "降水量", "風速", "日射量", "天気"]}, None
 
 
 def predict_weather_from_datetime(models_dict, scaler, year, month, day, hour):
@@ -544,73 +526,47 @@ COMBINATION_NUMBER_MAP = {
 }
 
 
-def load_combine_model(location_name, combination_name):
-    """
-    Combine_Modelフォルダからモデルをロード
-    
-    Parameters:
-    -----------
-    location_name : str
-        地域名（kumagaya または sendai）
-    combination_name : str
-        組み合わせ名（例：'原子力_火力'）
-    
-    Returns:
-    --------
-    model : trained model
-        訓練済みモデル
-    scaler : StandardScaler
-        特徴量の標準化用スケーラー
-    feature_names : list
-        出力特徴量の名前
-    """
-    work_dir = Path(__file__).parent / "Combine_Model"
-    
-    # モデルサフィックスを決定
+@st.cache_resource(show_spinner=False)
+def _load_combine_model_cached(location_name, combination_name):
+    """Combine_Modelのモデル一式をロードして共有キャッシュする。"""
+    work_dir = Path(__file__).resolve().parent / "Combine_Model"
     model_suffix = "toden" if location_name == "kumagaya" else "tohoku"
-    
-    # 組み合わせ名から番号を取得
+
     number = COMBINATION_NUMBER_MAP.get(combination_name)
     if number is None:
-        st.error(f"❌ 不正な組み合わせです: {combination_name}")
-        return None, None, None
-    
-    # モデルファイルをロード
+        raise ValueError(f"不正な組み合わせです: {combination_name}")
+
     model_file = work_dir / f"model_{model_suffix}_{number}_{combination_name}.pkl"
-    try:
-        model = joblib.load(model_file)
-    except FileNotFoundError:
-        st.error(f"❌ モデルファイルが見つかりません: {model_file}")
-        return None, None, None
-    except Exception as e:
-        st.error(f"❌ モデルのロードに失敗しました: {str(e)}")
-        return None, None, None
-    
-    # スケーラーをロード
+    model = joblib.load(model_file)
+
+    # スケーラーは、存在しない場合に限り従来どおり未使用で続行
     scaler_file = work_dir / f"scaler_{model_suffix}_{number}_{combination_name}.pkl"
     try:
         scaler = joblib.load(scaler_file)
     except FileNotFoundError:
-        st.warning(f"⚠️ スケーラーが見つかりません: {scaler_file}")
         scaler = None
-    except Exception as e:
-        st.warning(f"⚠️ スケーラーのロードに失敗しました: {str(e)}")
-        scaler = None
-    
-    # 特徴量名をJSONから取得
+
+    # JSONがなければ、組み合わせ名から特徴量名を補完
     info_file = work_dir / f"info_{model_suffix}_{number}_{combination_name}.json"
-    feature_names = None
     try:
-        import json
-        with open(info_file, 'r', encoding='utf-8') as f:
+        with open(info_file, "r", encoding="utf-8") as f:
             info = json.load(f)
-            # target_comboキーから出力特徴量を取得
-            feature_names = info.get('target_combo', combination_name.split('_'))
-    except Exception as e:
-        # JSONが見つからない場合は、combination_nameから推測
-        feature_names = combination_name.split('_')
-    
+        feature_names = info.get("target_combo", combination_name.split("_"))
+    except (OSError, ValueError, TypeError):
+        feature_names = combination_name.split("_")
+
     return model, scaler, feature_names
+
+
+def load_combine_model(location_name, combination_name):
+    """Combine_Modelのモデルをロードする。失敗内容は画面に表示する。"""
+    try:
+        return _load_combine_model_cached(location_name, combination_name)
+    except FileNotFoundError as e:
+        st.error(f"❌ Combine_Modelのモデルファイルが見つかりません: {e.filename or str(e)}")
+    except Exception as e:
+        st.error(f"❌ Combine_Modelのロードに失敗しました: {e}")
+    return None, None, None
 
 
 def predict_combine_model(model, scaler, input_data):
@@ -714,10 +670,15 @@ def main():
     # ------------------------------------------------------------
     @st.cache_resource(show_spinner=False)
     def _ensure_models_ready():
-        return download_models_from_gdrive()
+        # 失敗を例外にすることで、失敗結果がキャッシュされ続けるのを防ぐ
+        if not download_models_from_gdrive():
+            raise RuntimeError("モデル一式のダウンロードまたは配置に失敗しました")
+        return True
 
-    if not _ensure_models_ready():
-        st.error("❌ モデルファイルの準備に失敗したため、アプリを起動できません。")
+    try:
+        _ensure_models_ready()
+    except Exception as e:
+        st.error(f"❌ モデルファイルの準備に失敗したため、アプリを起動できません。詳細: {e}")
         st.info("Streamlit Secrets の GDRIVE_MODEL_ZIP_ID に、モデル一式ZIPのGoogle DriveファイルIDを設定してください。")
         st.stop()
     
