@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Streamlit Cloud 用モデルダウンローダー
@@ -15,6 +16,8 @@ models / Weather_Model / Combine_Model / UP_Model とルート直下へ展開す
 - ZIP内の日本語ファイル名に対応
 - ZIP Slip（パストラバーサル）を防止
 - 必要ファイルを明示的に検証する
+- filelock でモデル準備処理の同時実行を防ぐ
+- ロック取得後にモデルの状態を再確認する
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from pathlib import Path
 from typing import Iterable
 
 import gdown
+from filelock import FileLock, Timeout
 
 try:
     import streamlit as st
@@ -41,6 +45,9 @@ BASE_DIR = Path(__file__).resolve().parent
 TEMP_DIR = BASE_DIR / ".gdrive_temp"
 ZIP_CACHE = TEMP_DIR / "weather-models.zip"
 EXTRACT_DIR = TEMP_DIR / "extracted"
+
+# モデル準備処理の排他制御用ロックファイル
+MODEL_LOCK = BASE_DIR / ".model_download.lock"
 
 MODEL_DIRS = [
     "models",
@@ -59,6 +66,9 @@ GDRIVE_ZIP_FILE_ID = os.getenv(
 MAX_RETRIES = 3
 RETRY_WAIT_SECONDS = 5
 MIN_VALID_FILE_SIZE = 1
+
+# 別セッションが処理中の場合、最大10分間ロック取得を待つ
+LOCK_TIMEOUT_SECONDS = 600
 
 
 # ============================================================
@@ -115,19 +125,34 @@ def _required_root_files() -> list[str]:
 
 def _required_models_files() -> list[str]:
     files: list[str] = []
+
     for location in ("kumagaya", "sendai"):
         for element in ("原子力", "風力発電実績", "水力"):
             files.append(f"models/model_{location}_{element}.pkl")
+
         files.append(f"models/scaler_{location}.pkl")
+
     return files
 
 
 def _required_weather_files() -> list[str]:
     files: list[str] = []
+
     for location in ("kumagaya", "sendai"):
-        for element in ("気温", "相対湿度", "降水量", "風速", "日射量", "天気"):
-            files.append(f"Weather_Model/model_{location}_{element}.pkl")
+        for element in (
+            "気温",
+            "相対湿度",
+            "降水量",
+            "風速",
+            "日射量",
+            "天気",
+        ):
+            files.append(
+                f"Weather_Model/model_{location}_{element}.pkl"
+            )
+
         files.append(f"Weather_Model/scaler_{location}.pkl")
+
     return files
 
 
@@ -136,12 +161,14 @@ def _required_up_model_files() -> list[str]:
     files: list[str] = []
 
     for location in ("kumagaya", "sendai"):
-        # 発電種別ごとのUP Model
         for element in ("火力", "原子力", "水力", "太陽光", "風力"):
-            files.append(f"UP_Model/up_model_{location}_{element}.pkl")
+            files.append(
+                f"UP_Model/up_model_{location}_{element}.pkl"
+            )
 
-        # UP Model のメタデータ
-        files.append(f"UP_Model/UnitP_Model_metadata_{location}.json")
+        files.append(
+            f"UP_Model/UnitP_Model_metadata_{location}.json"
+        )
 
     return files
 
@@ -182,17 +209,21 @@ def _required_combine_files() -> list[str]:
     ]
 
     files: list[str] = []
+
     for location in ("toden", "tohoku"):
         for combination_name, number in combinations:
+            prefix = f"Combine_Model/"
+
             files.append(
-                f"Combine_Model/model_{location}_{number}_{combination_name}.pkl"
+                f"{prefix}model_{location}_{number}_{combination_name}.pkl"
             )
             files.append(
-                f"Combine_Model/scaler_{location}_{number}_{combination_name}.pkl"
+                f"{prefix}scaler_{location}_{number}_{combination_name}.pkl"
             )
             files.append(
-                f"Combine_Model/info_{location}_{number}_{combination_name}.json"
+                f"{prefix}info_{location}_{number}_{combination_name}.json"
             )
+
     return files
 
 
@@ -212,22 +243,30 @@ def get_required_model_files() -> list[str]:
 # ============================================================
 def _is_valid_file(path: Path) -> bool:
     try:
-        return path.is_file() and path.stat().st_size >= MIN_VALID_FILE_SIZE
+        return (
+            path.is_file()
+            and path.stat().st_size >= MIN_VALID_FILE_SIZE
+        )
     except OSError:
         return False
 
 
 def get_missing_model_files() -> list[str]:
-    missing: list[str] = []
-    for relative in get_required_model_files():
-        if not _is_valid_file(BASE_DIR / relative):
-            missing.append(relative)
-    return missing
+    return [
+        relative
+        for relative in get_required_model_files()
+        if not _is_valid_file(BASE_DIR / relative)
+    ]
 
 
 def get_existing_model_count() -> int:
     required = get_required_model_files()
-    return sum(1 for relative in required if _is_valid_file(BASE_DIR / relative))
+
+    return sum(
+        1
+        for relative in required
+        if _is_valid_file(BASE_DIR / relative)
+    )
 
 
 def check_models_complete() -> bool:
@@ -238,22 +277,46 @@ def check_models_complete() -> bool:
 # ZIPダウンロード
 # ============================================================
 def _get_zip_file_id() -> str:
-    value = os.getenv("GDRIVE_MODEL_ZIP_ID", GDRIVE_ZIP_FILE_ID).strip()
-    if not value or value == "ここにGoogle DriveのZIPファイルIDを設定":
+    value = os.getenv(
+        "GDRIVE_MODEL_ZIP_ID",
+        GDRIVE_ZIP_FILE_ID,
+    ).strip()
+
+    if (
+        not value
+        or value == "ここにGoogle DriveのZIPファイルIDを設定"
+    ):
         raise RuntimeError(
             "Google DriveのモデルZIPファイルIDが設定されていません。"
-            "GDRIVE_MODEL_ZIP_ID を Streamlit Secrets / 環境変数に設定してください。"
+            "GDRIVE_MODEL_ZIP_ID を Streamlit Secrets / "
+            "環境変数に設定してください。"
         )
+
     return value
 
 
 def download_model_zip() -> Path:
+    """
+    モデルZIPを取得する。
+
+    この関数は download_models_from_gdrive() がロックを
+    取得した状態で呼び出すことを前提とする。
+    """
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
     file_id = _get_zip_file_id()
 
     if _is_valid_file(ZIP_CACHE):
-        _write(f"既存のZIPを再利用します: {ZIP_CACHE}")
-        return ZIP_CACHE
+        # ZIPとして正常かも確認してから再利用する
+        try:
+            with zipfile.ZipFile(ZIP_CACHE, "r") as zf:
+                if zf.testzip() is None:
+                    _write(f"既存のZIPを再利用します: {ZIP_CACHE}")
+                    return ZIP_CACHE
+        except (OSError, zipfile.BadZipFile):
+            pass
+
+        _warning("既存のZIPが破損しているため、再取得します。")
 
     url = f"https://drive.google.com/uc?id={file_id}"
 
@@ -275,12 +338,24 @@ def download_model_zip() -> Path:
             )
 
             if result is None or not _is_valid_file(ZIP_CACHE):
-                raise RuntimeError("モデルZIPを取得できませんでした")
+                raise RuntimeError(
+                    "モデルZIPを取得できませんでした"
+                )
+
+            # HTMLなどをZIPとして誤認しないよう検証
+            with zipfile.ZipFile(ZIP_CACHE, "r") as zf:
+                bad = zf.testzip()
+
+                if bad is not None:
+                    raise RuntimeError(
+                        f"取得したZIPが破損しています: {bad}"
+                    )
 
             _success(
-                f"✅ モデルZIP取得成功 "
+                "✅ モデルZIP取得成功 "
                 f"({ZIP_CACHE.stat().st_size / 1024 / 1024:.1f} MB)"
             )
+
             return ZIP_CACHE
 
         except Exception as exc:
@@ -288,6 +363,7 @@ def download_model_zip() -> Path:
                 f"⚠️ ZIP取得失敗 ({attempt}/{MAX_RETRIES}): "
                 f"{type(exc).__name__}: {exc}"
             )
+
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_WAIT_SECONDS)
 
@@ -297,21 +373,39 @@ def download_model_zip() -> Path:
 # ============================================================
 # ZIP安全展開
 # ============================================================
-def _safe_zip_members(zf: zipfile.ZipFile) -> Iterable[tuple[zipfile.ZipInfo, Path]]:
+def _safe_zip_members(
+    zf: zipfile.ZipFile,
+) -> Iterable[tuple[zipfile.ZipInfo, Path]]:
     root = EXTRACT_DIR.resolve()
 
     for info in zf.infolist():
-        # ZIPのディレクトリは作成だけ許可
-        member = Path(info.filename)
+        # ZIP内のパス区切りを統一し、危険なパスを拒否する
+        normalized_name = info.filename.replace("\\", "/")
+        member = Path(normalized_name)
 
-        if member.is_absolute():
-            raise RuntimeError(f"安全でないZIPパスです: {info.filename}")
+        if (
+            member.is_absolute()
+            or ".." in member.parts
+            or "\x00" in normalized_name
+        ):
+            raise RuntimeError(
+                f"安全でないZIPパスです: {info.filename}"
+            )
+
+        # Windowsドライブ形式も拒否
+        if member.parts and ":" in member.parts[0]:
+            raise RuntimeError(
+                f"安全でないZIPパスです: {info.filename}"
+            )
 
         target = (EXTRACT_DIR / member).resolve()
+
         try:
             target.relative_to(root)
         except ValueError:
-            raise RuntimeError(f"安全でないZIPパスです: {info.filename}")
+            raise RuntimeError(
+                f"安全でないZIPパスです: {info.filename}"
+            )
 
         yield info, target
 
@@ -319,52 +413,78 @@ def _safe_zip_members(zf: zipfile.ZipFile) -> Iterable[tuple[zipfile.ZipInfo, Pa
 def extract_model_zip(zip_path: Path) -> Path:
     if EXTRACT_DIR.exists():
         shutil.rmtree(EXTRACT_DIR)
+
     EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
 
     _write("📂 モデルZIPを展開しています...")
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         bad = zf.testzip()
+
         if bad is not None:
             raise RuntimeError(f"ZIPが破損しています: {bad}")
 
         members = list(_safe_zip_members(zf))
+
         for info, target in members:
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
+
             target.parent.mkdir(parents=True, exist_ok=True)
+
             with zf.open(info, "r") as src, open(target, "wb") as dst:
                 shutil.copyfileobj(src, dst)
 
     _success("✅ ZIP展開完了")
+
     return EXTRACT_DIR
 
 
 # ============================================================
 # ZIP構造の吸収
 # ============================================================
-def _find_extracted_file(root: Path, relative: str) -> Path | None:
+def _find_extracted_file(
+    root: Path,
+    relative: str,
+) -> Path | None:
     direct = root / relative
+
     if _is_valid_file(direct):
         return direct
 
-    # ZIPが weather-models/ 配下になっている場合にも対応
-    candidates = list(root.rglob(Path(relative).name))
+    # ZIPが weather-models/ などの配下になっている場合に対応
+    target_parts = Path(relative).parts
+    target_length = len(target_parts)
+
+    candidates = root.rglob(Path(relative).name)
+
     for candidate in candidates:
         try:
-            candidate.relative_to(root)
+            rel_parts = candidate.relative_to(root).parts
         except ValueError:
             continue
-        if _is_valid_file(candidate):
-            rel_parts = candidate.relative_to(root).parts
-            target_parts = Path(relative).parts
-            if len(rel_parts) >= len(target_parts) and tuple(rel_parts[-len(target_parts):]) == tuple(target_parts):
-                return candidate
+
+        if not _is_valid_file(candidate):
+            continue
+
+        if (
+            len(rel_parts) >= target_length
+            and tuple(rel_parts[-target_length:]) == tuple(target_parts)
+        ):
+            return candidate
+
     return None
 
 
-def install_missing_models(extracted_root: Path) -> tuple[int, list[str]]:
+def install_missing_models(
+    extracted_root: Path,
+) -> tuple[int, list[str]]:
+    """
+    不足しているモデルだけ配置する。
+
+    既に存在する正常ファイルは再利用する。
+    """
     required = get_required_model_files()
     installed = 0
     missing: list[str] = []
@@ -374,11 +494,11 @@ def install_missing_models(extracted_root: Path) -> tuple[int, list[str]]:
     for relative in required:
         destination = BASE_DIR / relative
 
-        # 既に存在する正常ファイルは再利用
         if _is_valid_file(destination):
             continue
 
         source = _find_extracted_file(extracted_root, relative)
+
         if source is None:
             missing.append(relative)
             continue
@@ -391,19 +511,19 @@ def install_missing_models(extracted_root: Path) -> tuple[int, list[str]]:
 
 
 # ============================================================
-# メイン
+# ロック内で実行するモデル準備処理
 # ============================================================
-def download_models_from_gdrive(force: bool = False) -> bool:
+def _download_models_unlocked(force: bool = False) -> bool:
     """
-    必要モデルを揃える。
+    ロック取得済みの状態でモデルを準備する。
 
-    完全に揃っていればGoogle Driveへアクセスしない。
-    一部だけ不足している場合は、モデルZIPを取得して不足分だけ配置する。
+    この関数を直接呼び出さず、
+    download_models_from_gdrive() から呼び出すこと。
     """
     existing = get_existing_model_count()
     total = len(get_required_model_files())
 
-    _write(f"=== Model Check ===")
+    _write("=== Model Check (Locked) ===")
     _write(f"必要ファイル: {total}")
     _write(f"存在ファイル: {existing}")
 
@@ -421,21 +541,27 @@ def download_models_from_gdrive(force: bool = False) -> bool:
     try:
         zip_path = download_model_zip()
         extracted_root = extract_model_zip(zip_path)
-        installed, zip_missing = install_missing_models(extracted_root)
+
+        installed, zip_missing = install_missing_models(
+            extracted_root
+        )
 
         _write(f"配置したファイル: {installed}")
 
         if zip_missing:
             _error("❌ ZIP内に必要ファイルが不足しています。")
+
             for name in zip_missing[:30]:
                 _write(f"  - {name}")
+
             if len(zip_missing) > 30:
                 _write(f"  ... 他 {len(zip_missing) - 30} 件")
+
             return False
 
     except Exception as exc:
         _error(
-            f"❌ モデル準備に失敗しました: "
+            "❌ モデル準備に失敗しました: "
             f"{type(exc).__name__}: {exc}"
         )
         return False
@@ -443,19 +569,88 @@ def download_models_from_gdrive(force: bool = False) -> bool:
     final_missing = get_missing_model_files()
     final_count = get_existing_model_count()
 
-    _write(f"=== Final Model Check ===")
+    _write("=== Final Model Check ===")
     _write(f"存在ファイル: {final_count}/{total}")
 
     if final_missing:
-        _error(f"❌ まだ不足しているファイル: {len(final_missing)}")
+        _error(
+            f"❌ まだ不足しているファイル: {len(final_missing)}"
+        )
+
         for name in final_missing[:30]:
             _write(f"  - {name}")
+
         return False
 
     _success("🎉 すべてのモデルファイルの準備が完了しました！")
+
     return True
 
 
+# ============================================================
+# メイン：排他制御付きの公開関数
+# ============================================================
+def download_models_from_gdrive(force: bool = False) -> bool:
+    """
+    必要モデルを揃える。
+
+    1. ロックを取得する
+    2. ロック取得後にモデルの状態を再確認する
+    3. すべて揃っていればGoogle Driveへアクセスしない
+    4. 不足していればZIPを取得し、不足分を配置する
+    5. 処理終了時にロックを解放する
+
+    force=True の場合は、モデルが揃っていても準備処理を実行する。
+    ただし、既存ファイルを強制的に上書きする機能ではない。
+    """
+    try:
+        _write("🔒 モデル準備ロックを取得しています...")
+
+        # 同一ファイルシステムを共有する処理同士を排他制御
+        with FileLock(
+            str(MODEL_LOCK),
+            timeout=LOCK_TIMEOUT_SECONDS,
+        ):
+            _write("🔓 モデル準備ロックを取得しました。")
+
+            # 重要：
+            # ロック取得前の確認結果は信用せず、
+            # ロック取得後に必ず状態を再確認する。
+            existing = get_existing_model_count()
+            total = len(get_required_model_files())
+
+            _write("=== Model Check ===")
+            _write(f"必要ファイル: {total}")
+            _write(f"存在ファイル: {existing}")
+
+            if not force and existing == total:
+                _success("✅ 必要なモデルはすべて揃っています。")
+                return True
+
+            # ロック内でダウンロード・展開・配置を実行
+            return _download_models_unlocked(force=force)
+
+    except Timeout:
+        _error(
+            "❌ モデル準備ロックの取得がタイムアウトしました。"
+            f" {LOCK_TIMEOUT_SECONDS} 秒以内に他の処理が終了しませんでした。"
+        )
+        return False
+
+    except Exception as exc:
+        _error(
+            "❌ モデル準備処理でエラーが発生しました: "
+            f"{type(exc).__name__}: {exc}"
+        )
+        return False
+
+
+# ============================================================
+# 単独実行
+# ============================================================
 if __name__ == "__main__":
     ok = download_models_from_gdrive()
-    print("モデル準備完了" if ok else "モデル準備失敗")
+
+    print(
+        "モデル準備完了" if ok else "モデル準備失敗"
+    )

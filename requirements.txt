@@ -5,3 +5,4 @@ plotly
 scikit-learn
 joblib
 gdown>=6.0.0
+filelock
